@@ -14,16 +14,7 @@ from google_drive_utils import upload_to_drive, mover_arquivos_antigos, buscar_a
 app = FastAPI()
 
 # --- Configuração CORS ---
-origins = [
-    "http://localhost",
-    "http://192.168.2.123:5173",
-    "http://192.168.2.69:5173",
-    "http://localhost:5173", # O endereço padrão do seu frontend React em desenvolvimento
-    "https://web-production-a828.up.railway.app", # Adicionado para a URL da sua API
-    "https://script.google.com", # Adicionado para o Google Apps Script
-    # Se você tiver um domínio de produção para o seu frontend, adicione-o aqui também:
-    # "https://seu-dominio-frontend-em-producao.com",
-]
+origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
