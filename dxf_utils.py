@@ -8,7 +8,7 @@ def parse_sku(sku: str):
     """
     parts = sku.split('-')
     if len(parts) != 7:
-        print(f"[WARN] SKU '{sku}' não está no formato esperado (7 grupos).")
+        print(f"[WARN] SKU '{sku}' não está no formato esperado.")
         return None, None, None, None
 
     dxf_format = parts[0]
@@ -29,27 +29,20 @@ def calcular_bbox_dxf(msp):
         found_any_entity = True
         try:
             entity_bbox = e.bbox()
-            if entity_bbox.is_empty:
-                continue
-            bbox_union.extend(entity_bbox.extmin)
-            bbox_union.extend(entity_bbox.extmax)
+            if not entity_bbox.is_empty:
+                bbox_union.extend(entity_bbox.extmin)
+                bbox_union.extend(entity_bbox.extmax)
         except Exception:
             pass
 
     if not found_any_entity or bbox_union.is_empty:
         return 0, 0, 0, 0
 
-    min_x, min_y = bbox_union.extmin.x, bbox_union.extmin.y
-    max_x, max_y = bbox_union.extmax.x, bbox_union.extmax.y
-
-    if min_x >= max_x or min_y >= max_y:
-        return 0, 0, 0, 0
-
-    return min_x, min_y, max_x, max_y
+    return bbox_union.extmin.x, bbox_union.extmin.y, bbox_union.extmax.x, bbox_union.extmax.y
 
 def carregar_geometria(filepath):
     """
-    Lê um arquivo DXF ou SVG e retorna o objeto doc e o modelspace.
+    Lê um arquivo DXF ou SVG com salvaguardas contra travamentos.
     """
     ext = os.path.splitext(filepath)[1].lower()
     
@@ -64,7 +57,14 @@ def carregar_geometria(filepath):
         
         try:
             svg = SVG.parse(filepath)
+            # Limite de segurança para evitar loops infinitos em arquivos corrompidos
+            element_count = 0
             for element in svg.elements():
+                element_count += 1
+                if element_count > 1000:
+                    print(f"[WARN] SVG complexo demais, limitando processamento em {filepath}")
+                    break
+
                 transform_matrix = element.transform if hasattr(element, 'transform') else None
                 
                 try:
@@ -72,19 +72,20 @@ def carregar_geometria(filepath):
                         element = Path(element)
                         
                     if isinstance(element, Path):
-                        # Processa cada subcaminho individualmente para evitar o erro de atribuição
                         for subpath in element.as_subpaths():
                             sub_p = Path(subpath)
                             
+                            # Validação preventiva de comprimento
                             try:
-                                subpath_length = sub_p.length()
-                            except (TypeError, AttributeError):
-                                subpath_length = 0
-
-                            if subpath_length == 0:
+                                length = float(sub_p.length())
+                            except:
+                                length = 0
+                            
+                            if length <= 0:
                                 continue
                                 
-                            num_samples = max(20, int(subpath_length)) 
+                            # Amostragem otimizada: nem muito baixa para perder qualidade, nem alta para travar
+                            num_samples = min(max(10, int(length / 2)), 100) 
                             sub_points = []
                             
                             for i in range(num_samples + 1):
@@ -96,23 +97,20 @@ def carregar_geometria(filepath):
                                     y_trans = transform_matrix.b * x + transform_matrix.d * y + transform_matrix.f
                                     x, y = x_trans, y_trans
                                 
-                                # Inverte o eixo Y para o padrão DXF
                                 sub_points.append((x, -y))
                                 
-                            if sub_points:
+                            if len(sub_points) > 1:
                                 msp.add_lwpolyline(sub_points)
                 except Exception as e:
-                    print(f"[WARN] Erro ao converter elemento SVG: {e}")
+                    print(f"[WARN] Elemento ignorado devido a erro: {e}")
                     
         except Exception as file_err:
-             print(f"[ERROR] Falha grave ao ler SVG: {file_err}")
-             pass
+             print(f"[ERROR] Erro ao processar SVG: {file_err}")
 
         return doc, msp
 
     elif ext == '.dxf':
-        doc = ezdxf.readfile(filepath)
-        return doc, doc.modelspace()
+        return ezdxf.readfile(filepath), None
     
     else:
         raise ValueError(f"Formato não suportado: {ext}")
