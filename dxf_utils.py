@@ -82,35 +82,61 @@ def carregar_geometria(filepath):
         
         doc = ezdxf.new('R2010')
         msp = doc.modelspace()
-        svg = SVG.parse(filepath)
         
-        # Extrai geometria do SVG e converte para polilinhas DXF
-        for element in svg.elements():
-            try:
-                if isinstance(element, Shape):
-                    element = Path(element) # Converte formas básicas (rect, circle) para caminhos matemáticos
-                    
-                if isinstance(element, Path):
-                    if len(element) == 0: continue
-                    
-                    for subpath in element.as_subpaths():
-                        length = subpath.length()
-                        if length == 0: continue
-                        
-                        # Amostragem adaptativa (mais pontos em caminhos longos/curvos)
-                        num_samples = max(20, int(length)) 
-                        sub_points = []
-                        
-                        for i in range(num_samples + 1):
-                            pt = subpath.point(i / num_samples)
-                            # SVG cresce o eixo Y para baixo, DXF cresce o Y para cima. Invertemos o Y:
-                            sub_points.append((pt.x, -pt.y))
-                            
-                        if sub_points:
-                            msp.add_lwpolyline(sub_points)
-            except Exception as e:
-                print(f"[WARN] Erro ao converter elemento SVG: {e}")
+        try:
+            svg = SVG.parse(filepath)
+            
+            # Extrai geometria do SVG e converte para polilinhas DXF
+            for element in svg.elements():
+                # Precisamos aplicar o transform (matrix) que vem no SVG para que fique no tamanho/posição certa
+                transform_matrix = element.transform if hasattr(element, 'transform') else None
                 
+                try:
+                    if isinstance(element, Shape):
+                        element = Path(element) # Converte formas básicas (rect, circle) para caminhos matemáticos
+                        
+                    if isinstance(element, Path):
+                        # Pega o comprimento total do Path. svgelements agrupa os subpaths no objeto Path pai
+                        total_length = element.length()
+                        
+                        if total_length == 0:
+                            continue
+                            
+                        # Iterar sobre os subpaths. Em svgelements, as_subpaths() retorna novos objetos Path
+                        for subpath in element.as_subpaths():
+                            subpath_length = subpath.length()
+                            if subpath_length == 0:
+                                continue
+                                
+                            # Amostragem adaptativa (mais pontos em caminhos longos/curvos)
+                            num_samples = max(20, int(subpath_length)) 
+                            sub_points = []
+                            
+                            for i in range(num_samples + 1):
+                                # point() retorna o ponto ao longo da curva baseada em uma proporção de 0 a 1
+                                pt = subpath.point(i / num_samples)
+                                
+                                x, y = pt.x, pt.y
+                                
+                                # Se houver matriz de transformação aplicada ao grupo/elemento, multiplica as coordenadas
+                                if transform_matrix:
+                                    x_trans = transform_matrix.a * x + transform_matrix.c * y + transform_matrix.e
+                                    y_trans = transform_matrix.b * x + transform_matrix.d * y + transform_matrix.f
+                                    x, y = x_trans, y_trans
+                                
+                                # SVG cresce o eixo Y para baixo, DXF cresce o Y para cima. Invertemos o Y:
+                                sub_points.append((x, -y))
+                                
+                            if sub_points:
+                                msp.add_lwpolyline(sub_points)
+                except Exception as e:
+                    print(f"[WARN] Erro ao converter elemento SVG '{type(element).__name__}': {e}")
+                    
+        except Exception as file_err:
+             print(f"[ERROR] Falha grave ao tentar ler o arquivo SVG '{filepath}': {file_err}")
+             # Em caso de erro crítico no SVG, retornaremos um DXF vazio para o layout engine tentar seguir
+             pass
+
         return doc, msp
 
     elif ext == '.dxf':
