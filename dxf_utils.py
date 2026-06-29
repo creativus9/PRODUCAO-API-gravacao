@@ -96,15 +96,29 @@ def carregar_geometria(filepath):
                         element = Path(element) # Converte formas básicas (rect, circle) para caminhos matemáticos
                         
                     if isinstance(element, Path):
-                        # Pega o comprimento total do Path. svgelements agrupa os subpaths no objeto Path pai
-                        total_length = element.length()
                         
+                        try:
+                            total_length = element.length()
+                        except TypeError:
+                            total_length = element.length # Fallback se for lido como propriedade
+                        except AttributeError:
+                            total_length = 0
+
                         if total_length == 0:
                             continue
                             
-                        # Iterar sobre os subpaths. Em svgelements, as_subpaths() retorna novos objetos Path
+                        # Iterar sobre os subpaths.
                         for subpath in element.as_subpaths():
-                            subpath_length = subpath.length()
+                            # Envolve o subpath novamente num objeto Path completo para garantir suporte aos métodos de cálculo
+                            sub_p = Path(subpath)
+                            
+                            try:
+                                subpath_length = sub_p.length()
+                            except TypeError:
+                                subpath_length = sub_p.length # Se a lib mudou a função para propriedade
+                            except AttributeError:
+                                subpath_length = 0
+
                             if subpath_length == 0:
                                 continue
                                 
@@ -114,7 +128,7 @@ def carregar_geometria(filepath):
                             
                             for i in range(num_samples + 1):
                                 # point() retorna o ponto ao longo da curva baseada em uma proporção de 0 a 1
-                                pt = subpath.point(i / num_samples)
+                                pt = sub_p.point(i / num_samples)
                                 
                                 x, y = pt.x, pt.y
                                 
