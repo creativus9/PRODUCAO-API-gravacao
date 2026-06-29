@@ -1,11 +1,10 @@
 import os
 import json
 import datetime
-import re
-import io
+import re # Importar módulo de expressões regulares
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
 # Carrega credenciais direto da variável de ambiente
@@ -27,6 +26,7 @@ drive_service = build('drive', 'v3', credentials=creds)
 
 DEFAULT_FOLDER_ID = "1fLWrdK6MUhbeyBDvWHjz-2bTmZ2GB0ap"
 
+
 def baixar_arquivo_drive(file_id: str, nome_arquivo_local: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
     Baixa um arquivo do Google Drive usando seu ID.
@@ -35,15 +35,9 @@ def baixar_arquivo_drive(file_id: str, nome_arquivo_local: str, drive_folder_id:
     local_path = f"/tmp/{nome_arquivo_local}"
     try:
         request = drive_service.files().get_media(fileId=file_id)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-        
         with open(local_path, 'wb') as f:
-            f.write(fh.getvalue())
-            
+            data = request.execute()
+            f.write(data)
         print(f"[INFO] Arquivo '{nome_arquivo_local}' (ID: {file_id}) baixado para '{local_path}'.")
         return local_path
     except HttpError as error:
@@ -53,6 +47,7 @@ def baixar_arquivo_drive(file_id: str, nome_arquivo_local: str, drive_folder_id:
             raise Exception(f"Erro ao baixar arquivo com ID '{file_id}': {error}")
     except Exception as e:
         raise Exception(f"Erro inesperado ao baixar arquivo com ID '{file_id}': {e}")
+
 
 def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
@@ -67,8 +62,7 @@ def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_fo
         response = drive_service.files().list(q=query, fields="files(id, name)").execute()
         files = response.get('files', [])
 
-        # ALTERAÇÃO AQUI: Permite que o arquivo termine em .dxf ou .svg
-        pattern = re.compile(rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.(dxf|svg)$", re.IGNORECASE)
+        pattern = re.compile(rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.dxf$", re.IGNORECASE)
 
         found_files = []
         for f in files:
@@ -84,6 +78,7 @@ def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_fo
         raise Exception(f"Erro ao buscar arquivo personalizado para ID '{target_id}': {error}")
     except Exception as e:
         raise Exception(f"Erro inesperado ao buscar arquivo personalizado para ID '{target_id}': {e}")
+
 
 def upload_to_drive(caminho_arquivo_local: str, nome_arquivo_drive: str, mime_type: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
@@ -105,9 +100,10 @@ def upload_to_drive(caminho_arquivo_local: str, nome_arquivo_drive: str, mime_ty
     except Exception as e:
         raise Exception(f"Erro inesperado ao fazer upload do arquivo '{nome_arquivo_drive}': {e}")
 
+
 def mover_arquivos_antigos(drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
-    Move arquivos .dxf, .svg e .png com data diferente da atual para subpasta 'arquivo morto'.
+    Move arquivos .dxf e .png com data diferente da atual para subpasta 'arquivo morto'.
     Retorna quantidade movida.
     """
     hoje = datetime.datetime.now().strftime("%d-%m-%Y")
@@ -129,16 +125,14 @@ def mover_arquivos_antigos(drive_folder_id: str = DEFAULT_FOLDER_ID):
     if not dest_id:
         raise Exception("Não foi possível encontrar ou criar a pasta 'arquivo morto'.")
 
-    # ALTERAÇÃO AQUI: Adicionado image/svg+xml na query
-    query_files = f"'{drive_folder_id}' in parents and (mimeType='application/dxf' or mimeType='image/png' or mimeType='image/svg+xml')"
+    query_files = f"'{drive_folder_id}' in parents and (mimeType='application/dxf' or mimeType='image/png')"
     resp_files = drive_service.files().list(q=query_files, fields="files(id,name,parents)").execute()
     files = resp_files.get('files', [])
     
     moved_count = 0
     for f in files:
         name = f.get('name', '')
-        # ALTERAÇÃO AQUI: Adicionado svg no regex de limpeza
-        match = re.search(r'(\d{2}-\d{2}-\d{4})\.(dxf|png|svg)$', name)
+        match = re.search(r'(\d{2}-\d{2}-\d{4})\.(dxf|png)$', name)
         
         if match:
             file_date_str = match.group(1)
@@ -240,3 +234,4 @@ def esvaziar_lixeira_drive():
         raise Exception(f"Erro ao esvaziar a lixeira do Drive: {error}")
     except Exception as e:
         raise Exception(f"Erro inesperado ao esvaziar a lixeira do Drive: {e}")
+
