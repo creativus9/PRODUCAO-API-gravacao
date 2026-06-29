@@ -1,10 +1,11 @@
 import os
 import json
 import datetime
-import re # Importar módulo de expressões regulares
+import re
+import io
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from googleapiclient.errors import HttpError
 
 # Carrega credenciais direto da variável de ambiente
@@ -26,7 +27,6 @@ drive_service = build('drive', 'v3', credentials=creds)
 
 DEFAULT_FOLDER_ID = "1fLWrdK6MUhbeyBDvWHjz-2bTmZ2GB0ap"
 
-
 def baixar_arquivo_drive(file_id: str, nome_arquivo_local: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
     Baixa um arquivo do Google Drive usando seu ID.
@@ -35,9 +35,15 @@ def baixar_arquivo_drive(file_id: str, nome_arquivo_local: str, drive_folder_id:
     local_path = f"/tmp/{nome_arquivo_local}"
     try:
         request = drive_service.files().get_media(fileId=file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+        
         with open(local_path, 'wb') as f:
-            data = request.execute()
-            f.write(data)
+            f.write(fh.getvalue())
+            
         print(f"[INFO] Arquivo '{nome_arquivo_local}' (ID: {file_id}) baixado para '{local_path}'.")
         return local_path
     except HttpError as error:
@@ -47,7 +53,6 @@ def baixar_arquivo_drive(file_id: str, nome_arquivo_local: str, drive_folder_id:
             raise Exception(f"Erro ao baixar arquivo com ID '{file_id}': {error}")
     except Exception as e:
         raise Exception(f"Erro inesperado ao baixar arquivo com ID '{file_id}': {e}")
-
 
 def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
@@ -79,7 +84,6 @@ def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_fo
     except Exception as e:
         raise Exception(f"Erro inesperado ao buscar arquivo personalizado para ID '{target_id}': {e}")
 
-
 def upload_to_drive(caminho_arquivo_local: str, nome_arquivo_drive: str, mime_type: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
     Faz upload de um arquivo para o Google Drive e retorna sua URL pública.
@@ -99,7 +103,6 @@ def upload_to_drive(caminho_arquivo_local: str, nome_arquivo_drive: str, mime_ty
         raise Exception(f"Erro ao fazer upload do arquivo '{nome_arquivo_drive}': {error}")
     except Exception as e:
         raise Exception(f"Erro inesperado ao fazer upload do arquivo '{nome_arquivo_drive}': {e}")
-
 
 def mover_arquivos_antigos(drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
@@ -234,4 +237,3 @@ def esvaziar_lixeira_drive():
         raise Exception(f"Erro ao esvaziar a lixeira do Drive: {error}")
     except Exception as e:
         raise Exception(f"Erro inesperado ao esvaziar a lixeira do Drive: {e}")
-

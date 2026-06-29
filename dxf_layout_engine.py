@@ -24,6 +24,14 @@ except ImportError as e:
     print(f"ERROR: dxf_layout_engine.py - Falha ao importar google_drive_utils: {e}")
     raise # Re-levanta o erro para que o traceback seja claro
 
+# Importa o módulo de conversão SVG -> DXF
+try:
+    from converte_svg_dxf import converter_svg_para_dxf
+    print("DEBUG: dxf_layout_engine.py - converte_svg_dxf importado com sucesso.")
+except ImportError as e:
+    print(f"ERROR: dxf_layout_engine.py - Falha ao importar converte_svg_dxf: {e}")
+    raise
+
 # --- Exceção Customizada ---
 # Esta exceção agora será levantada apenas se NENHUMA entidade válida for gerada para um plano.
 # Falhas em itens individuais serão reportadas na lista de retorno.
@@ -155,7 +163,7 @@ def generate_single_plan_layout_data(
     failed_ids_current_plan = [] # Nova lista para IDs de arquivos que falharam neste plano
 
     # --- 1. Baixar e Organizar DXFs de Itens ---
-    print(f"[INFO] Baixando e organizando DXFs de itens para o plano '{plan_name}'...")
+    print(f"[INFO] Baixando e organizando DXFs/SVGs de itens para o plano '{plan_name}'...")
     for item_data in file_ids_and_skus:
         target_id_from_sheet = item_data['id_arquivo_drive'] 
         sku = item_data['sku']
@@ -188,15 +196,37 @@ def generate_single_plan_layout_data(
             failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
 
-        local_dxf_name = f"{sku}.dxf"
+        # Identifica a extensão do arquivo no Drive (pode ser .dxf ou .svg)
+        _, file_extension = os.path.splitext(nome_arquivo_drive.lower())
+        if not file_extension:
+            file_extension = '.dxf' # Fallback caso venha sem extensão
+        
+        local_filename = f"{sku}{file_extension}"
+        baixado_path_local = None
+        dxf_path_local = f"/tmp/{sku}.dxf"  # O motor vai sempre tentar ler este caminho
+
         try:
-            dxf_path_local = baixar_arquivo_drive(real_file_id, local_dxf_name, drive_folder_id)
+            # Baixa o arquivo com a extensão que ele possuir (.dxf ou .svg)
+            baixado_path_local = baixar_arquivo_drive(real_file_id, local_filename, drive_folder_id)
         except Exception as e:
-            print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID real: {real_file_id}): {e}. Adicionando ID a falhas.")
+            print(f"[ERROR] Falha ao baixar arquivo para SKU '{sku}' (ID real: {real_file_id}): {e}. Adicionando ID a falhas.")
             failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
 
         try:
+            # Se for SVG, realiza a conversão antes do motor prosseguir
+            if file_extension == '.svg':
+                print(f"[INFO] Arquivo SVG detectado para SKU '{sku}'. Iniciando conversão para DXF...")
+                sucesso = converter_svg_para_dxf(baixado_path_local, dxf_path_local)
+                if not sucesso:
+                    print(f"[ERROR] Falha ao converter SVG '{baixado_path_local}' para DXF. Ignorando item.")
+                    failed_ids_current_plan.append(target_id_from_sheet)
+                    continue
+            else:
+                # Assumimos que o arquivo baixado já é o DXF
+                dxf_path_local = baixado_path_local
+
+            # Daqui para frente o fluxo segue idêntico: lemos o DXF (gerado ou baixado)
             item_doc = ezdxf.readfile(dxf_path_local)
             item_msp = item_doc.modelspace()
             min_x, min_y, max_x, max_y = calcular_bbox_dxf(item_msp)
@@ -204,12 +234,11 @@ def generate_single_plan_layout_data(
             dxf_width = max_x - min_x
             dxf_height = max_y - min_y
 
-            # --- Fallback para dimensões fixas se bbox for 0x0 (Adicionado) ---
+            # --- Fallback para dimensões fixas se bbox for 0x0 ---
             if dxf_width == 0.0 and dxf_height == 0.0:
                 print(f"[WARN] Dimensões de SKU '{sku}' (ID: {target_id_from_sheet}) calculadas como 0x0. Usando dimensões fixas: {ITEM_DXF_FIXED_WIDTH_MM}x{ITEM_DXF_FIXED_HEIGHT_MM} mm.")
                 dxf_width = ITEM_DXF_FIXED_WIDTH_MM
                 dxf_height = ITEM_DXF_FIXED_HEIGHT_MM
-                # Para o offset, assumimos que o ponto de origem do desenho é (0,0) se não houver bbox válido
                 min_x, min_y = 0.0, 0.0 
             # --- Fim do Fallback ---
 
@@ -217,7 +246,7 @@ def generate_single_plan_layout_data(
             for entity in item_msp:
                 entities_to_add.append(entity.copy()) # Copia para evitar referências ao doc original
 
-            if not entities_to_add: # Se o DXF foi lido mas não tem entidades visíveis
+            if not entities_to_add:
                 print(f"[WARN] DXF para SKU '{sku}' (ID: {target_id_from_sheet}) não contém entidades visíveis. Adicionando ID a falhas.")
                 failed_ids_current_plan.append(target_id_from_sheet)
                 continue
@@ -229,17 +258,20 @@ def generate_single_plan_layout_data(
                 'bbox_height': dxf_height,
                 'original_min_x': min_x,
                 'original_min_y': min_y,
-                'id_arquivo_drive': target_id_from_sheet # Adiciona o ID aqui para rastreamento
+                'id_arquivo_drive': target_id_from_sheet 
             })
             print(f"[INFO] DXF para SKU '{sku}' (ID: {target_id_from_sheet}, cor: {color_code}, formato: {dxf_format}, tamanho: {dxf_size}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
 
         except ezdxf.DXFStructureError as e:
             print(f"[ERROR] Arquivo DXF '{dxf_path_local}' corrompido ou inválido: {e}. Adicionando ID a falhas.")
-            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
+            failed_ids_current_plan.append(target_id_from_sheet)
         except Exception as e:
-            print(f"[ERROR] Erro ao processar DXF '{dxf_path_local}': {e}. Adicionando ID a falhas.")
-            failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
+            print(f"[ERROR] Erro ao processar arquivo '{dxf_path_local}': {e}. Adicionando ID a falhas.")
+            failed_ids_current_plan.append(target_id_from_sheet)
         finally:
+            # Garante que os temporários (SVG e DXF) sejam excluídos do sistema de arquivos após o uso
+            if baixado_path_local and os.path.exists(baixado_path_local) and baixado_path_local != dxf_path_local:
+                os.remove(baixado_path_local)
             if os.path.exists(dxf_path_local):
                 os.remove(dxf_path_local)
 
@@ -261,7 +293,7 @@ def generate_single_plan_layout_data(
             plano_height = max_y_plano - min_y_plano
             plano_original_min_x, plano_original_min_y = min_x_plano, min_y_plano
 
-            # --- Fallback para dimensões fixas se bbox for 0x0 (Adicionado) ---
+            # --- Fallback para dimensões fixas se bbox for 0x0 ---
             if plano_width == 0.0 and plano_height == 0.0:
                 print(f"[WARN] Dimensões do plano '{plan_name}.dxf' calculadas como 0x0. Usando dimensões fixas: {PLANO_DXF_FIXED_WIDTH_MM}x{PLANO_DXF_FIXED_HEIGHT_MM} mm.")
                 plano_width = PLANO_DXF_FIXED_WIDTH_MM
@@ -270,16 +302,16 @@ def generate_single_plan_layout_data(
             # --- Fim do Fallback ---
 
             for ent in plano_msp:
-                plano_entities.append(ent.copy()) # Copia para evitar referências ao doc original
+                plano_entities.append(ent.copy()) 
             
             print(f"[INFO] DXF do plano de corte '{plano_info_dxf_path}' carregado. Dimensões: {plano_width:.2f}x{plano_height:.2f} mm")
 
         except ezdxf.DXFStructureError as e:
             print(f"[ERROR] Arquivo DXF do plano de corte '{plano_info_dxf_path}' corrompido ou inválido: {e}. Plano não será inserido.")
-            plano_entities = [] # Limpa as entidades se houver erro
+            plano_entities = [] 
         except Exception as e:
             print(f"[ERROR] Erro ao carregar DXF do plano de corte '{plano_info_dxf_path}': {e}. Plano não será inserido.")
-            plano_entities = [] # Limpa as entidades se houver erro
+            plano_entities = [] 
     else:
         print(f"[WARN] DXF do plano de corte '{plano_info_dxf_path}' não encontrado localmente. Não será inserido.")
 
