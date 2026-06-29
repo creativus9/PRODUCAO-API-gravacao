@@ -1,74 +1,117 @@
 # converte_svg_dxf.py
 import ezdxf
 import os
-import xml.etree.ElementTree as ET
+import math
 
-# Adicionando prints para depuração e rastreabilidade no Railway
-print("DEBUG: converte_svg_dxf.py - Módulo de conversão carregado.")
+try:
+    from svgelements import SVG, Path, Move, Line, CubicBezier, QuadraticBezier, Arc, Close
+    print("DEBUG: converte_svg_dxf.py - svgelements importado com sucesso.")
+except ImportError:
+    print("[ERROR] A biblioteca 'svgelements' não está instalada. Adicione 'svgelements==1.9.6' no requirements.txt.")
+    raise
 
-def parse_svg_transform_matrix(transform_string: str):
+print("DEBUG: converte_svg_dxf.py - Módulo de conversão carregado e pronto.")
+
+def amostrar_segmento_curvo(segmento, passos=15):
     """
-    Extrai valores de matrix() ou translate()/scale() do atributo transform do SVG.
-    (Necessário para lidar com o <g transform="..."> e <path matrix(...)> do seu SVG)
+    Transforma uma curva (Bezier Cúbica, Quadrática ou Arco) em uma lista de pontos (X, Y).
+    Isso facilita muito a leitura em máquinas Laser e softwares CAD, evitando problemas com SPLINEs.
+    O eixo Y é invertido (y = -y) porque o SVG cresce para baixo e o DXF cresce para cima.
     """
-    # Lógica matemática para extrair [a, b, c, d, e, f] da string do SVG
-    pass
+    pontos = []
+    for i in range(passos + 1):
+        t = i / passos
+        pt = segmento.point(t)
+        pontos.append((pt.x, -pt.y))  # Inverte o Y do SVG para o formato DXF
+    return pontos
 
 def converter_svg_para_dxf(caminho_svg_entrada: str, caminho_dxf_saida: str) -> bool:
     """
-    Recebe um caminho local de um arquivo SVG baixado do Drive, 
-    lê as tags XML (paths, circles, rects), aplica as matrizes de transformação,
-    e gera um arquivo DXF local pronto para ser consumido pelo motor principal.
-    
-    Args:
-        caminho_svg_entrada: Ex: "/tmp/PLAC-3010-2FH... .svg"
-        caminho_dxf_saida: Ex: "/tmp/PLAC-3010-2FH... .dxf"
-        
-    Returns:
-        True se a conversão foi bem sucedida, False caso contrário.
+    Lê um arquivo SVG, aplica todas as matrizes de transformações aninhadas (scale, translate, matrix),
+    amostra as curvas e salva tudo em um arquivo DXF limpo.
     """
     print(f"[INFO] Iniciando conversão de SVG para DXF. Arquivo: {caminho_svg_entrada}")
-    
-    if not os.path.exists(caminho_svg_entrada):
-        print(f"[ERROR] Arquivo SVG não encontrado: {caminho_svg_entrada}")
-        return False
-
     try:
-        # 1. Cria um novo documento DXF temporário apenas para a conversão
+        # 1. Faz o parse matemático do SVG
+        svg = SVG.parse(caminho_svg_entrada)
+        
+        # 2. Prepara o documento DXF
         doc = ezdxf.new('R2010')
-        doc.header['$INSUNITS'] = 4  # Milímetros
+        doc.header['$INSUNITS'] = 4  # 4 = Milímetros
         msp = doc.modelspace()
+        
+        entidades_geradas = 0
 
-        # 2. Parseia o XML do SVG
-        tree = ET.parse(caminho_svg_entrada)
-        root = tree.getroot()
-        
-        # Namespaces padrão de SVGs
-        ns = {'svg': 'http://www.w3.org/2000/svg'}
+        # 3. Itera sobre todos os elementos vetoriais do SVG
+        for elemento in svg.elements():
+            # Ignora tags estruturais que não são geometria
+            nome_tipo = type(elemento).__name__
+            if nome_tipo in ('SVG', 'Group', 'Defs', 'Style', 'Use', 'Text'):
+                continue
+            
+            try:
+                # Transforma qualquer geometria (Rect, Circle, Ellipse, Polygon) em um Path matemático
+                caminho = Path(elemento)
+                
+                # A MÁGICA ACONTECE AQUI: 
+                # Multiplicar o caminho pelo seu 'transform' resolve todas as matrizes
+                # de translação, escala e rotação, colocando os pontos no espaço global puro.
+                caminho *= caminho.transform
+                
+                polilinha_atual = []
+                
+                # Itera sobre os segmentos que formam a figura
+                for segmento in caminho:
+                    
+                    if isinstance(segmento, Move):
+                        # Se já havia uma linha sendo desenhada, fecha e joga no DXF
+                        if polilinha_atual and len(polilinha_atual) > 1:
+                            msp.add_lwpolyline(polilinha_atual)
+                            entidades_geradas += 1
+                        
+                        # Inicia uma nova linha no novo ponto (invertendo Y)
+                        polilinha_atual = [(segmento.end.x, -segmento.end.y)]
+                        
+                    elif isinstance(segmento, Line):
+                        # Apenas adiciona o próximo ponto
+                        polilinha_atual.append((segmento.end.x, -segmento.end.y))
+                        
+                    elif isinstance(segmento, (CubicBezier, QuadraticBezier, Arc)):
+                        # Transforma a curva em micro-retas (amostragem)
+                        pontos_curva = amostrar_segmento_curvo(segmento, passos=15)
+                        
+                        # O ponto[0] da curva é o mesmo que o último ponto da polilinha atual.
+                        # Usamos [1:] para não duplicar o vértice, o que causaria artefatos.
+                        polilinha_atual.extend(pontos_curva[1:])
+                        
+                    elif isinstance(segmento, Close):
+                        # Fecha a figura ligando o último ponto ao primeiro
+                        if polilinha_atual:
+                            if polilinha_atual[0] != polilinha_atual[-1]:
+                                polilinha_atual.append(polilinha_atual[0])
+                            
+                            msp.add_lwpolyline(polilinha_atual)
+                            entidades_geradas += 1
+                            polilinha_atual = [] # Zera para a próxima figura
+                
+                # Se após o loop de segmentos ainda sobrou uma linha aberta na memória, salva ela
+                if polilinha_atual and len(polilinha_atual) > 1:
+                    msp.add_lwpolyline(polilinha_atual)
+                    entidades_geradas += 1
 
-        # 3. Extrair Estilos CSS (Seção <style>) para mapear cores
-        # Ex: Mapear a cor Amarela de Referência (#FFF212) do seu SVG
-        
-        # 4. Iterar sobre todos os elementos (g, rect, path, circle)
-        # Atenção especial aos elementos com 'vector-effect="non-scaling-stroke"'
-        # e as curvas complexas descritas na tag 'd' do <path>
-        
-        # -- LÓGICA DE CONVERSÃO A SER IMPLEMENTADA --
-        # Para cada <circle cx="34.97" cy="31.25" r="7.67"/>:
-        #     msp.add_circle(center=(cx, -cy), radius=r) # Note a inversão do Y no CAD
-        #
-        # Para cada <path d="M... C... m..."/>:
-        #     - Parsear os comandos SVG (M=MoveTo, L=LineTo, C=CubicBezier)
-        #     - Aplicar o transform="matrix(0.1027..., 0, 0, ...)"
-        #     - Converter Bezier Cúbicas para splines aproximadas no ezdxf
-        
-        # Simulação de salvamento
+            except Exception as e_elemento:
+                print(f"[WARN] Aviso ao processar um sub-elemento do SVG: {e_elemento}")
+
+        # Salva o arquivo gerado
         doc.saveas(caminho_dxf_saida)
-        print(f"[SUCCESS] Arquivo convertido salvo em: {caminho_dxf_saida}")
+        
+        if entidades_geradas == 0:
+            print(f"[WARN] Nenhuma entidade desenhável encontrada no SVG '{caminho_svg_entrada}'. O DXF ficará vazio.")
+        else:
+            print(f"[SUCCESS] Arquivo convertido salvo com {entidades_geradas} polilinhas em: {caminho_dxf_saida}")
+            
         return True
-
-    except Exception as e:
-        print(f"[ERROR] Falha crítica durante a conversão de {caminho_svg_entrada}: {e}")
+        
+    except Exception as ex:
+        print(f"[ERROR] Falha crítica ao converter SVG '{caminho_svg_entrada}' para DXF: {ex}")
         return False
-
-print("DEBUG: converte_svg_dxf.py - Estrutura carregada e pronta para integração.")
