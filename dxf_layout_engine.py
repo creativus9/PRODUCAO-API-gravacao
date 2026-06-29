@@ -11,7 +11,7 @@ print("DEBUG: dxf_layout_engine.py - Início do carregamento do módulo.")
 
 # Importa as funções utilitárias e de Google Drive
 try:
-    from dxf_utils import parse_sku, calcular_bbox_dxf
+    from dxf_utils import parse_sku, calcular_bbox_dxf, carregar_geometria
     print("DEBUG: dxf_layout_engine.py - dxf_utils importado com sucesso.")
 except ImportError as e:
     print(f"ERROR: dxf_layout_engine.py - Falha ao importar dxf_utils: {e}")
@@ -188,17 +188,22 @@ def generate_single_plan_layout_data(
             failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
 
-        local_dxf_name = f"{sku}.dxf"
+        # Descobre a extensão do arquivo retornado pelo Google Drive (.dxf ou .svg)
+        extensao = os.path.splitext(nome_arquivo_drive)[1].lower()
+        if extensao not in ['.dxf', '.svg']:
+            extensao = '.dxf' # Fallback seguro
+
+        local_file_name = f"{sku}{extensao}"
         try:
-            dxf_path_local = baixar_arquivo_drive(real_file_id, local_dxf_name, drive_folder_id)
+            dxf_path_local = baixar_arquivo_drive(real_file_id, local_file_name, drive_folder_id)
         except Exception as e:
-            print(f"[ERROR] Falha ao baixar DXF para SKU '{sku}' (ID real: {real_file_id}): {e}. Adicionando ID a falhas.")
+            print(f"[ERROR] Falha ao baixar arquivo para SKU '{sku}' (ID real: {real_file_id}): {e}. Adicionando ID a falhas.")
             failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
             continue
 
         try:
-            item_doc = ezdxf.readfile(dxf_path_local)
-            item_msp = item_doc.modelspace()
+            # Substituímos as chamadas de ezdxf.readfile para nossa nova função
+            item_doc, item_msp = carregar_geometria(dxf_path_local)
             min_x, min_y, max_x, max_y = calcular_bbox_dxf(item_msp)
             
             dxf_width = max_x - min_x
@@ -218,7 +223,7 @@ def generate_single_plan_layout_data(
                 entities_to_add.append(entity.copy()) # Copia para evitar referências ao doc original
 
             if not entities_to_add: # Se o DXF foi lido mas não tem entidades visíveis
-                print(f"[WARN] DXF para SKU '{sku}' (ID: {target_id_from_sheet}) não contém entidades visíveis. Adicionando ID a falhas.")
+                print(f"[WARN] Geometria para SKU '{sku}' (ID: {target_id_from_sheet}) não contém entidades visíveis. Adicionando ID a falhas.")
                 failed_ids_current_plan.append(target_id_from_sheet)
                 continue
 
@@ -231,13 +236,13 @@ def generate_single_plan_layout_data(
                 'original_min_y': min_y,
                 'id_arquivo_drive': target_id_from_sheet # Adiciona o ID aqui para rastreamento
             })
-            print(f"[INFO] DXF para SKU '{sku}' (ID: {target_id_from_sheet}, cor: {color_code}, formato: {dxf_format}, tamanho: {dxf_size}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
+            print(f"[INFO] Item para SKU '{sku}' (ID: {target_id_from_sheet}, cor: {color_code}, formato: {dxf_format}, tamanho: {dxf_size}, furo: {hole_type}) processado. Dimensões: {dxf_width:.2f}x{dxf_height:.2f} mm")
 
         except ezdxf.DXFStructureError as e:
             print(f"[ERROR] Arquivo DXF '{dxf_path_local}' corrompido ou inválido: {e}. Adicionando ID a falhas.")
             failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
         except Exception as e:
-            print(f"[ERROR] Erro ao processar DXF '{dxf_path_local}': {e}. Adicionando ID a falhas.")
+            print(f"[ERROR] Erro ao processar arquivo '{dxf_path_local}': {e}. Adicionando ID a falhas.")
             failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
         finally:
             if os.path.exists(dxf_path_local):

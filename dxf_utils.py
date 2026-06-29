@@ -1,3 +1,4 @@
+import os
 import ezdxf
 from ezdxf.math import BoundingBox, Vec3 # Adiciona importação de BoundingBox e Vec3
 
@@ -65,3 +66,56 @@ def calcular_bbox_dxf(msp):
         return 0, 0, 0, 0
 
     return min_x, min_y, max_x, max_y
+
+def carregar_geometria(filepath):
+    """
+    Lê um arquivo DXF ou SVG e retorna o objeto doc e o modelspace preenchido.
+    Para SVG, requer a biblioteca 'svgelements' instalada (pip install svgelements).
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    
+    if ext == '.svg':
+        try:
+            from svgelements import SVG, Path, Shape
+        except ImportError:
+            raise ImportError("O pacote 'svgelements' não está instalado. Adicione no requirements.txt ou execute: pip install svgelements")
+        
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        svg = SVG.parse(filepath)
+        
+        # Extrai geometria do SVG e converte para polilinhas DXF
+        for element in svg.elements():
+            try:
+                if isinstance(element, Shape):
+                    element = Path(element) # Converte formas básicas (rect, circle) para caminhos matemáticos
+                    
+                if isinstance(element, Path):
+                    if len(element) == 0: continue
+                    
+                    for subpath in element.as_subpaths():
+                        length = subpath.length()
+                        if length == 0: continue
+                        
+                        # Amostragem adaptativa (mais pontos em caminhos longos/curvos)
+                        num_samples = max(20, int(length)) 
+                        sub_points = []
+                        
+                        for i in range(num_samples + 1):
+                            pt = subpath.point(i / num_samples)
+                            # SVG cresce o eixo Y para baixo, DXF cresce o Y para cima. Invertemos o Y:
+                            sub_points.append((pt.x, -pt.y))
+                            
+                        if sub_points:
+                            msp.add_lwpolyline(sub_points)
+            except Exception as e:
+                print(f"[WARN] Erro ao converter elemento SVG: {e}")
+                
+        return doc, msp
+
+    elif ext == '.dxf':
+        doc = ezdxf.readfile(filepath)
+        return doc, doc.modelspace()
+    
+    else:
+        raise ValueError(f"Formato não suportado: {ext}")
