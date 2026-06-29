@@ -62,8 +62,7 @@ def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_fo
         response = drive_service.files().list(q=query, fields="files(id, name)").execute()
         files = response.get('files', [])
 
-        # Regex atualizada para suportar tanto .dxf quanto .svg
-        pattern = re.compile(rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.(dxf|svg)$", re.IGNORECASE)
+        pattern = re.compile(rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.dxf$", re.IGNORECASE)
 
         found_files = []
         for f in files:
@@ -126,16 +125,14 @@ def mover_arquivos_antigos(drive_folder_id: str = DEFAULT_FOLDER_ID):
     if not dest_id:
         raise Exception("Não foi possível encontrar ou criar a pasta 'arquivo morto'.")
 
-    # Atualizado para buscar DXF, PNG e também SVG
-    query_files = f"'{drive_folder_id}' in parents and (mimeType='application/dxf' or mimeType='image/png' or mimeType='image/svg+xml')"
+    query_files = f"'{drive_folder_id}' in parents and (mimeType='application/dxf' or mimeType='image/png')"
     resp_files = drive_service.files().list(q=query_files, fields="files(id,name,parents)").execute()
     files = resp_files.get('files', [])
     
     moved_count = 0
     for f in files:
         name = f.get('name', '')
-        # Adicionado suporte a .svg na checagem de exclusão
-        match = re.search(r'(\d{2}-\d{2}-\d{4})\.(dxf|png|svg)$', name, re.IGNORECASE)
+        match = re.search(r'(\d{2}-\d{2}-\d{4})\.(dxf|png)$', name)
         
         if match:
             file_date_str = match.group(1)
@@ -237,3 +234,4 @@ def esvaziar_lixeira_drive():
         raise Exception(f"Erro ao esvaziar a lixeira do Drive: {error}")
     except Exception as e:
         raise Exception(f"Erro inesperado ao esvaziar a lixeira do Drive: {e}")
+
