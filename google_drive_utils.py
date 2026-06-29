@@ -67,7 +67,8 @@ def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_fo
         response = drive_service.files().list(q=query, fields="files(id, name)").execute()
         files = response.get('files', [])
 
-        pattern = re.compile(rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.dxf$", re.IGNORECASE)
+        # ALTERAÇÃO AQUI: Permite que o arquivo termine em .dxf ou .svg
+        pattern = re.compile(rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.(dxf|svg)$", re.IGNORECASE)
 
         found_files = []
         for f in files:
@@ -106,7 +107,7 @@ def upload_to_drive(caminho_arquivo_local: str, nome_arquivo_drive: str, mime_ty
 
 def mover_arquivos_antigos(drive_folder_id: str = DEFAULT_FOLDER_ID):
     """
-    Move arquivos .dxf e .png com data diferente da atual para subpasta 'arquivo morto'.
+    Move arquivos .dxf, .svg e .png com data diferente da atual para subpasta 'arquivo morto'.
     Retorna quantidade movida.
     """
     hoje = datetime.datetime.now().strftime("%d-%m-%Y")
@@ -128,14 +129,16 @@ def mover_arquivos_antigos(drive_folder_id: str = DEFAULT_FOLDER_ID):
     if not dest_id:
         raise Exception("Não foi possível encontrar ou criar a pasta 'arquivo morto'.")
 
-    query_files = f"'{drive_folder_id}' in parents and (mimeType='application/dxf' or mimeType='image/png')"
+    # ALTERAÇÃO AQUI: Adicionado image/svg+xml na query
+    query_files = f"'{drive_folder_id}' in parents and (mimeType='application/dxf' or mimeType='image/png' or mimeType='image/svg+xml')"
     resp_files = drive_service.files().list(q=query_files, fields="files(id,name,parents)").execute()
     files = resp_files.get('files', [])
     
     moved_count = 0
     for f in files:
         name = f.get('name', '')
-        match = re.search(r'(\d{2}-\d{2}-\d{4})\.(dxf|png)$', name)
+        # ALTERAÇÃO AQUI: Adicionado svg no regex de limpeza
+        match = re.search(r'(\d{2}-\d{2}-\d{4})\.(dxf|png|svg)$', name)
         
         if match:
             file_date_str = match.group(1)
