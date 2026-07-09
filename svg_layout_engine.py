@@ -142,48 +142,274 @@ def _load_svg_root(caminho_svg: str, fallback_width: float, fallback_height: flo
     }
 
 
+def _tag_name(element: ET.Element) -> str:
+    """Retorna o nome local da tag, ignorando namespace."""
+    return str(element.tag).split("}")[-1].lower()
+
+
 def _prepare_nested_svg(svg_data: Dict[str, Any], x: float, y: float) -> ET.Element:
-    nested = copy.deepcopy(svg_data["root"])
+    source_root = copy.deepcopy(svg_data["root"])
 
-    # Posiciona o SVG inteiro no plano final. Isso preserva o SVG original como SVG,
-    # sem transformar em DXF, path achatado ou imagem raster.
-    nested.set("x", f"{_fmt(x)}mm")
-    nested.set("y", f"{_fmt(y)}mm")
-    nested.set("width", f"{_fmt(svg_data['width'])}mm")
-    nested.set("height", f"{_fmt(svg_data['height'])}mm")
-    nested.set("overflow", "visible")
-    nested.set("pointer-events", "all")
-    _unlock_svg_tree(nested)
-    return nested
+    # LightBurn costuma interpretar mal <svg> dentro de <svg> usando x/y.
+    # Por isso o arquivo importado vira um <g transform=...> normal, que é mais
+    # compatível com Corel, LightBurn e outros leitores SVG.
+    wrapper = ET.Element(f"{{{SVG_NS}}}g")
+    wrapper.set("transform", f"translate({_fmt(x)},{_fmt(y)})")
+    wrapper.set("pointer-events", "all")
+    wrapper.set("data-locked", "false")
 
+    # Leva atributos visuais simples do <svg> original para o grupo, mas não leva
+    # width/height/viewBox/x/y, porque agora o posicionamento é feito por transform.
+    ignored_root_attrs = {
+        "x", "y", "width", "height", "viewBox", "viewbox", "version",
+        "xmlns", "xmlns:xlink", "overflow", "preserveAspectRatio",
+    }
+    for attr_name, attr_value in source_root.attrib.items():
+        if attr_name in ignored_root_attrs or attr_name.startswith("xmlns"):
+            continue
+        wrapper.set(attr_name, attr_value)
 
+    _unlock_svg_tree(source_root)
+
+    view_box = _parse_viewbox(source_root)
+    content_parent = wrapper
+
+    if view_box:
+        min_x, min_y, vb_width, vb_height = view_box
+        if vb_width > 0 and vb_height > 0:
+            scale_x = svg_data["width"] / vb_width
+            scale_y = svg_data["height"] / vb_height
+            needs_matrix = (
+                abs(scale_x - 1.0) > 0.0001
+                or abs(scale_y - 1.0) > 0.0001
+                or abs(min_x) > 0.0001
+                or abs(min_y) > 0.0001
+            )
+            if needs_matrix:
+                content_parent = ET.SubElement(wrapper, f"{{{SVG_NS}}}g")
+                # Equivale ao comportamento do viewBox: (coord - min) * escala.
+                content_parent.set(
+                    "transform",
+                    f"matrix({_fmt(scale_x)} 0 0 {_fmt(scale_y)} {_fmt(-min_x * scale_x)} {_fmt(-min_y * scale_y)})",
+                )
+                content_parent.set("pointer-events", "all")
+                content_parent.set("data-locked", "false")
+
+    for child in list(source_root):
+        source_root.remove(child)
+        content_parent.append(child)
+
+    return wrapper
 
 
 def _sanitize_style_for_editing(style_value: str) -> str:
     """
-    Remove travas comuns de edição/seleção sem destruir o restante do estilo inline.
+    Remove travas comuns de edição/seleção e propriedades de texto que alguns
+    importadores SVG, principalmente o LightBurn, interpretam mal.
     """
+    props_to_remove = {
+        "pointer-events",
+        "user-select",
+        "-webkit-user-select",
+        "-moz-user-select",
+        "-ms-user-select",
+        "dominant-baseline",
+        "alignment-baseline",
+        "baseline-shift",
+        "text-length",
+        "textlength",
+        "length-adjust",
+        "lengthadjust",
+    }
+
     cleaned_parts = []
     for raw_part in style_value.split(";"):
         part = raw_part.strip()
         if not part:
             continue
 
+        prop_name = part.split(":", 1)[0].strip().lower()
+        if prop_name in props_to_remove:
+            continue
+
+        # Mantém compatibilidade com a regra antiga caso venha sem separador claro.
         lower = part.lower().replace(" ", "")
         if lower.startswith("pointer-events:none"):
-            continue
-        if lower.startswith("user-select:none"):
-            continue
-        if lower.startswith("-webkit-user-select:none"):
-            continue
-        if lower.startswith("-moz-user-select:none"):
-            continue
-        if lower.startswith("-ms-user-select:none"):
             continue
 
         cleaned_parts.append(part)
 
     return "; ".join(cleaned_parts)
+
+
+TEXT_ATTRS_TO_REMOVE_FOR_LIGHTBURN = {
+    "dominant-baseline",
+    "alignment-baseline",
+    "baseline-shift",
+    "textLength",
+    "textlength",
+    "lengthAdjust",
+    "lengthadjust",
+}
+
+
+def _first_svg_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", str(value))
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _font_size_number(attrs: Dict[str, str], fallback: float = 12.0) -> float:
+    font_size = attrs.get("font-size")
+    if not font_size and attrs.get("style"):
+        match = re.search(r"font-size\s*:\s*([^;]+)", attrs["style"], re.IGNORECASE)
+        if match:
+            font_size = match.group(1)
+
+    parsed = _first_svg_number(font_size)
+    return parsed if parsed and parsed > 0 else fallback
+
+
+def _parse_svg_delta(value: Any, font_size: float) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().split()[0] if str(value).strip() else ""
+    if not text:
+        return None
+
+    match = re.match(r"^([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)([a-zA-Z%]*)$", text)
+    if not match:
+        return _first_svg_number(text)
+
+    number = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "em":
+        return number * font_size
+    if unit == "%":
+        return (number / 100.0) * font_size
+
+    # Para mm/px/sem unidade, mantém o número no sistema de coordenadas do SVG.
+    return number
+
+
+def _sanitize_text_node_for_lightburn(element: ET.Element) -> None:
+    if _tag_name(element) not in {"text", "tspan"}:
+        return
+
+    for attr_name in list(element.attrib.keys()):
+        if attr_name in TEXT_ATTRS_TO_REMOVE_FOR_LIGHTBURN:
+            element.attrib.pop(attr_name, None)
+
+    if "style" in element.attrib:
+        cleaned_style = _sanitize_style_for_editing(element.attrib.get("style", ""))
+        if cleaned_style:
+            element.set("style", cleaned_style)
+        else:
+            element.attrib.pop("style", None)
+
+
+def _flatten_tspan_text_for_lightburn(text_element: ET.Element) -> List[ET.Element] | None:
+    """
+    Troca <text><tspan ...>...</tspan></text> por vários <text> simples.
+    Isso evita que o LightBurn empilhe linhas/letras quando ignora x/y/dy de tspan.
+    """
+    direct_tspans = [child for child in list(text_element) if _tag_name(child) == "tspan"]
+    if not direct_tspans:
+        return None
+
+    parent_attrs = dict(text_element.attrib)
+    parent_attrs.pop("id", None)  # evita IDs duplicados quando uma linha vira várias
+    _sanitize_text_node_for_lightburn(text_element)
+
+    current_x = parent_attrs.get("x", "0")
+    current_y = parent_attrs.get("y", "0")
+    current_x_num = _first_svg_number(current_x)
+    current_y_num = _first_svg_number(current_y)
+    base_font_size = _font_size_number(parent_attrs)
+
+    replacements: List[ET.Element] = []
+
+    if text_element.text and text_element.text.strip():
+        base_text = ET.Element(text_element.tag, parent_attrs)
+        base_text.text = text_element.text
+        _sanitize_text_node_for_lightburn(base_text)
+        replacements.append(base_text)
+
+    for index, tspan in enumerate(direct_tspans, start=1):
+        attrs = dict(parent_attrs)
+        tspan_attrs = dict(tspan.attrib)
+
+        parent_transform = attrs.get("transform")
+        tspan_transform = tspan_attrs.get("transform")
+        attrs.update(tspan_attrs)
+        if parent_transform and tspan_transform:
+            attrs["transform"] = f"{parent_transform} {tspan_transform}"
+
+        font_size = _font_size_number(attrs, base_font_size)
+
+        if tspan_attrs.get("x") is not None:
+            current_x = tspan_attrs.get("x", current_x)
+            current_x_num = _first_svg_number(current_x)
+        elif tspan_attrs.get("dx") is not None and current_x_num is not None:
+            delta_x = _parse_svg_delta(tspan_attrs.get("dx"), font_size)
+            if delta_x is not None:
+                current_x_num += delta_x
+                current_x = _fmt(current_x_num)
+
+        if tspan_attrs.get("y") is not None:
+            current_y = tspan_attrs.get("y", current_y)
+            current_y_num = _first_svg_number(current_y)
+        elif tspan_attrs.get("dy") is not None and current_y_num is not None:
+            delta_y = _parse_svg_delta(tspan_attrs.get("dy"), font_size)
+            if delta_y is not None:
+                current_y_num += delta_y
+                current_y = _fmt(current_y_num)
+
+        attrs["x"] = str(current_x)
+        attrs["y"] = str(current_y)
+        attrs.pop("dx", None)
+        attrs.pop("dy", None)
+
+        # Se o tspan tinha ID próprio, preserva; se não, não duplica o ID do <text>.
+        if "id" in parent_attrs and "id" not in tspan_attrs:
+            attrs.pop("id", None)
+
+        new_text = ET.Element(text_element.tag, attrs)
+        new_text.text = "".join(tspan.itertext())
+        new_text.tail = tspan.tail
+        _sanitize_text_node_for_lightburn(new_text)
+        replacements.append(new_text)
+
+    if replacements:
+        replacements[-1].tail = text_element.tail
+
+    return replacements
+
+
+def _normalize_text_children_for_lightburn(parent: ET.Element) -> None:
+    for child in list(parent):
+        _normalize_text_children_for_lightburn(child)
+
+    children = list(parent)
+    for child in children:
+        if _tag_name(child) != "text":
+            continue
+
+        _sanitize_text_node_for_lightburn(child)
+        replacements = _flatten_tspan_text_for_lightburn(child)
+        if not replacements:
+            continue
+
+        insert_at = list(parent).index(child)
+        parent.remove(child)
+        for offset, replacement in enumerate(replacements):
+            parent.insert(insert_at + offset, replacement)
 
 
 def _unlock_svg_tree(element: ET.Element) -> None:
@@ -217,9 +443,12 @@ def _unlock_svg_tree(element: ET.Element) -> None:
             element.attrib.pop("style", None)
 
     element.set("data-locked", "false")
+    _sanitize_text_node_for_lightburn(element)
 
     for child in list(element):
         _unlock_svg_tree(child)
+
+    _normalize_text_children_for_lightburn(element)
 
 
 def _load_barra_svg():
@@ -254,9 +483,7 @@ def _add_barra_if_available(parent_group: ET.Element, barra_svg, current_x_pos: 
         return current_x_pos + ESPACAMENTO_DXF_MESMO_FURO
 
     current_x_pos += ESPACAMENTO_SEPARADOR_PRE_BARRA
-    x = current_x_pos - barra_svg["original_min_x"]
-    y = row_base_y - barra_svg["original_min_y"]
-    parent_group.append(_prepare_nested_svg(barra_svg, x, y))
+    parent_group.append(_prepare_nested_svg(barra_svg, current_x_pos, row_base_y))
     current_x_pos += barra_svg["width"] + ESPACAMENTO_SEPARADOR_POST_BARRA + ADJUSTMENT_OFFSET_BARRA_MM
     return current_x_pos
 
@@ -264,34 +491,18 @@ def _add_barra_if_available(parent_group: ET.Element, barra_svg, current_x_pos: 
 
 def _add_plan_title(parent_group: ET.Element, plan_name: str) -> None:
     """
-    Adiciona o título do plano em uma posição fixa e mais estável entre editores SVG.
-
-    O ponto importante é NÃO depender do y original do <text> como baseline global.
-    Em alguns sistemas o baseline muda conforme a fonte substituída. Por isso o texto
-    fica dentro de um grupo com transform fixo, e o texto é alinhado pelo topo.
+    Adiciona o título do plano como <text> simples, sem baseline avançado.
+    O LightBurn é mais consistente quando recebe x/y absolutos e y como baseline.
     """
-    title_group = ET.SubElement(parent_group, f"{{{SVG_NS}}}g")
-    title_group.set("id", f"plano-gravacao-{re.sub(r'[^A-Za-z0-9_-]+', '-', str(plan_name)).strip('-') or 'sem-nome'}")
-    title_group.set("transform", f"translate({_fmt(PLANO_TEXTO_X_MM)},{_fmt(PLANO_TEXTO_Y_MM)})")
-    title_group.set("pointer-events", "all")
-    title_group.set("data-locked", "false")
-
-    plano_text = ET.SubElement(title_group, f"{{{SVG_NS}}}text")
-    plano_text.set("x", "0")
-    plano_text.set("y", "0")
-    plano_text.set("dy", "0")
-    plano_text.set("font-family", "Arial Black, Arial, Helvetica, sans-serif")
+    plano_text = ET.SubElement(parent_group, f"{{{SVG_NS}}}text")
+    plano_text.set("id", f"plano-gravacao-{re.sub(r'[^A-Za-z0-9_-]+', '-', str(plan_name)).strip('-') or 'sem-nome'}")
+    plano_text.set("x", f"{_fmt(PLANO_TEXTO_X_MM)}")
+    plano_text.set("y", f"{_fmt(PLANO_TEXTO_Y_MM + PLANO_TEXTO_TAMANHO_FONTE_MM)}")
+    plano_text.set("font-family", "Arial, Helvetica, sans-serif")
     plano_text.set("font-size", f"{_fmt(PLANO_TEXTO_TAMANHO_FONTE_MM)}")
     plano_text.set("font-weight", "900")
-    plano_text.set("letter-spacing", "0.6")
     plano_text.set("fill", "#ff0000")
-    plano_text.set("stroke", "#9b0000")
-    plano_text.set("stroke-width", "0.6")
-    plano_text.set("paint-order", "stroke fill")
-    plano_text.set("dominant-baseline", "text-before-edge")
-    plano_text.set("alignment-baseline", "before-edge")
     plano_text.set("text-anchor", "start")
-    plano_text.set("xml:space", "preserve")
     plano_text.set("pointer-events", "all")
     plano_text.set("data-locked", "false")
     plano_text.text = f"Plano de Gravação {plan_name}"
@@ -414,9 +625,7 @@ def generate_single_plan_svg_layout_data(
                         if not first_svg_in_group:
                             current_x_pos += ESPACAMENTO_DXF_MESMO_FURO
 
-                        x = current_x_pos - svg_item["original_min_x"]
-                        y = row_base_y - svg_item["original_min_y"]
-                        plan_group.append(_prepare_nested_svg(svg_item["svg_data"], x, y))
+                        plan_group.append(_prepare_nested_svg(svg_item["svg_data"], current_x_pos, row_base_y))
 
                         current_x_pos += svg_item["bbox_width"]
                         layout_width = max(layout_width, current_x_pos + MARGEM_ESQUERDA)
