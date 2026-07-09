@@ -32,8 +32,11 @@ ET.register_namespace("", SVG_NS)
 ET.register_namespace("xlink", XLINK_NS)
 
 BARRA_SVG_PATH = os.path.join("Plano_Info", "Barra.svg")
-PLANO_TEXTO_ALTURA_MM = 22.0
-PLANO_TEXTO_TAMANHO_FONTE_MM = 14.0
+PLANO_TEXTO_ALTURA_MM = 34.0
+PLANO_TEXTO_TAMANHO_FONTE_MM = 18.0
+PLANO_TEXTO_X_MM = MARGEM_ESQUERDA
+PLANO_TEXTO_Y_MM = MARGEM_SUPERIOR
+PLANO_TEXTO_CAIXA_ALTURA_MM = 28.0
 
 _barra_svg_cache = None
 
@@ -149,7 +152,74 @@ def _prepare_nested_svg(svg_data: Dict[str, Any], x: float, y: float) -> ET.Elem
     nested.set("width", f"{_fmt(svg_data['width'])}mm")
     nested.set("height", f"{_fmt(svg_data['height'])}mm")
     nested.set("overflow", "visible")
+    nested.set("pointer-events", "all")
+    _unlock_svg_tree(nested)
     return nested
+
+
+
+
+def _sanitize_style_for_editing(style_value: str) -> str:
+    """
+    Remove travas comuns de edição/seleção sem destruir o restante do estilo inline.
+    """
+    cleaned_parts = []
+    for raw_part in style_value.split(";"):
+        part = raw_part.strip()
+        if not part:
+            continue
+
+        lower = part.lower().replace(" ", "")
+        if lower.startswith("pointer-events:none"):
+            continue
+        if lower.startswith("user-select:none"):
+            continue
+        if lower.startswith("-webkit-user-select:none"):
+            continue
+        if lower.startswith("-moz-user-select:none"):
+            continue
+        if lower.startswith("-ms-user-select:none"):
+            continue
+
+        cleaned_parts.append(part)
+
+    return "; ".join(cleaned_parts)
+
+
+def _unlock_svg_tree(element: ET.Element) -> None:
+    """
+    Garante que nada do SVG final fique bloqueado para seleção/edição.
+    Remove/neutraliza atributos comuns de bloqueio tanto no wrapper quanto nos filhos importados.
+    """
+    attrs_to_remove = [
+        "data-locked",
+        "data-lock",
+        "locked",
+        "lock",
+        "readonly",
+        "readOnly",
+        "contenteditable",
+        "contentEditable",
+    ]
+
+    for attr_name in attrs_to_remove:
+        if attr_name in element.attrib:
+            element.attrib.pop(attr_name, None)
+
+    if "pointer-events" in element.attrib:
+        element.set("pointer-events", "all")
+
+    if "style" in element.attrib:
+        cleaned_style = _sanitize_style_for_editing(element.attrib.get("style", ""))
+        if cleaned_style:
+            element.set("style", cleaned_style)
+        else:
+            element.attrib.pop("style", None)
+
+    element.set("data-locked", "false")
+
+    for child in list(element):
+        _unlock_svg_tree(child)
 
 
 def _load_barra_svg():
@@ -190,6 +260,41 @@ def _add_barra_if_available(parent_group: ET.Element, barra_svg, current_x_pos: 
     current_x_pos += barra_svg["width"] + ESPACAMENTO_SEPARADOR_POST_BARRA + ADJUSTMENT_OFFSET_BARRA_MM
     return current_x_pos
 
+
+
+def _add_plan_title(parent_group: ET.Element, plan_name: str) -> None:
+    """
+    Adiciona o título do plano em uma posição fixa e mais estável entre editores SVG.
+
+    O ponto importante é NÃO depender do y original do <text> como baseline global.
+    Em alguns sistemas o baseline muda conforme a fonte substituída. Por isso o texto
+    fica dentro de um grupo com transform fixo, e o texto é alinhado pelo topo.
+    """
+    title_group = ET.SubElement(parent_group, f"{{{SVG_NS}}}g")
+    title_group.set("id", f"plano-gravacao-{re.sub(r'[^A-Za-z0-9_-]+', '-', str(plan_name)).strip('-') or 'sem-nome'}")
+    title_group.set("transform", f"translate({_fmt(PLANO_TEXTO_X_MM)},{_fmt(PLANO_TEXTO_Y_MM)})")
+    title_group.set("pointer-events", "all")
+    title_group.set("data-locked", "false")
+
+    plano_text = ET.SubElement(title_group, f"{{{SVG_NS}}}text")
+    plano_text.set("x", "0")
+    plano_text.set("y", "0")
+    plano_text.set("dy", "0")
+    plano_text.set("font-family", "Arial Black, Arial, Helvetica, sans-serif")
+    plano_text.set("font-size", f"{_fmt(PLANO_TEXTO_TAMANHO_FONTE_MM)}")
+    plano_text.set("font-weight", "900")
+    plano_text.set("letter-spacing", "0.6")
+    plano_text.set("fill", "#ff0000")
+    plano_text.set("stroke", "#9b0000")
+    plano_text.set("stroke-width", "0.6")
+    plano_text.set("paint-order", "stroke fill")
+    plano_text.set("dominant-baseline", "text-before-edge")
+    plano_text.set("alignment-baseline", "before-edge")
+    plano_text.set("text-anchor", "start")
+    plano_text.set("xml:space", "preserve")
+    plano_text.set("pointer-events", "all")
+    plano_text.set("data-locked", "false")
+    plano_text.text = f"Plano de Gravação {plan_name}"
 
 def generate_single_plan_svg_layout_data(
     file_ids_and_skus: list[dict],
@@ -263,20 +368,14 @@ def generate_single_plan_svg_layout_data(
     plan_group = ET.Element(f"{{{SVG_NS}}}g")
     plan_group.set("data-plan-name", str(plan_name))
 
-    text_width_estimate = max(PLANO_DXF_FIXED_WIDTH_MM, len(f"Plano de Gravação {plan_name}") * 6.0)
+    text_width_estimate = max(PLANO_DXF_FIXED_WIDTH_MM, len(f"Plano de Gravação {plan_name}") * 9.0)
     layout_width = MARGEM_ESQUERDA + text_width_estimate + MARGEM_ESQUERDA
 
-    current_y = MARGEM_SUPERIOR
+    _add_plan_title(plan_group, plan_name)
 
-    plano_text = ET.SubElement(plan_group, f"{{{SVG_NS}}}text")
-    plano_text.set("x", f"{_fmt(MARGEM_ESQUERDA)}")
-    plano_text.set("y", f"{_fmt(current_y + PLANO_TEXTO_TAMANHO_FONTE_MM)}")
-    plano_text.set("font-family", "Arial, Helvetica, sans-serif")
-    plano_text.set("font-size", f"{_fmt(PLANO_TEXTO_TAMANHO_FONTE_MM)}")
-    plano_text.set("fill", "black")
-    plano_text.text = f"Plano de Gravação {plan_name}"
-
-    current_y += max(PLANO_TEXTO_ALTURA_MM, PLANO_DXF_FIXED_HEIGHT_MM) + ESPACAMENTO_PLANO_COR
+    # Espaço reservado fixo para o título. Isso impede que a posição dos itens dependa
+    # da altura calculada da fonte em cada editor/visualizador SVG.
+    current_y = MARGEM_SUPERIOR + PLANO_TEXTO_CAIXA_ALTURA_MM + ESPACAMENTO_PLANO_COR
 
     for color_code in sorted(organized_svgs.keys()):
         color_group = organized_svgs[color_code]
@@ -343,10 +442,13 @@ def create_svg_document(width_mm: float, height_mm: float) -> ET.Element:
     root.set("height", f"{_fmt(height_mm)}mm")
     root.set("viewBox", f"0 0 {_fmt(width_mm)} {_fmt(height_mm)}")
     root.set("version", "1.1")
+    root.set("pointer-events", "all")
+    root.set("data-locked", "false")
     return root
 
 
 def save_svg_document(root: ET.Element, output_path: str) -> None:
+    _unlock_svg_tree(root)
     tree = ET.ElementTree(root)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
