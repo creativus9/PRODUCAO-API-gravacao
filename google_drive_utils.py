@@ -49,36 +49,92 @@ def baixar_arquivo_drive(file_id: str, nome_arquivo_local: str, drive_folder_id:
         raise Exception(f"Erro inesperado ao baixar arquivo com ID '{file_id}': {e}")
 
 
-def buscar_arquivo_personalizado_por_id_e_sku(target_id: str, sku: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
+def buscar_arquivo_personalizado_por_id_e_sku(
+    target_id: str,
+    sku: str,
+    drive_folder_id: str = DEFAULT_FOLDER_ID,
+    extensoes_permitidas=(".dxf",),
+    retornar_extensao: bool = False,
+):
     """
-    Busca um arquivo no Google Drive que contenha o ID (ex: XXXX) e "Arquivo Personalizado"
-    no nome, dentro da pasta especificada.
-    Retorna o ID do arquivo e seu nome completo no Drive.
+    Busca um arquivo personalizado no Google Drive que contenha o ID lógico
+    e "Arquivo Personalizado" no nome, dentro da pasta especificada.
+
+    Por padrão mantém o comportamento antigo: retorna somente arquivos .dxf
+    e devolve (id, nome). Para o modo híbrido, passe extensoes_permitidas
+    como (".dxf", ".svg") e retornar_extensao=True.
     """
     escaped_target_id = re.escape(target_id)
-    query = f"'{drive_folder_id}' in parents and name contains '{target_id}' and name contains 'Arquivo Personalizado' and mimeType != 'application/vnd.google-apps.folder'"
-    
+
+    if isinstance(extensoes_permitidas, str):
+        extensoes_permitidas = (extensoes_permitidas,)
+
+    extensoes_normalizadas = []
+    for ext in extensoes_permitidas:
+        ext = str(ext).lower().strip()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = f".{ext}"
+        extensoes_normalizadas.append(ext)
+
+    if not extensoes_normalizadas:
+        extensoes_normalizadas = [".dxf"]
+
+    query = (
+        f"'{drive_folder_id}' in parents and "
+        f"name contains '{target_id}' and "
+        f"name contains 'Arquivo Personalizado' and "
+        f"mimeType != 'application/vnd.google-apps.folder'"
+    )
+
     try:
         response = drive_service.files().list(q=query, fields="files(id, name)").execute()
         files = response.get('files', [])
 
-        pattern = re.compile(rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.dxf$", re.IGNORECASE)
+        exts_regex = "|".join(re.escape(ext.lstrip(".")) for ext in extensoes_normalizadas)
+        pattern = re.compile(
+            rf"^{escaped_target_id}\s*-\s*Arquivo Personalizado.*\.({exts_regex})$",
+            re.IGNORECASE,
+        )
 
         found_files = []
         for f in files:
-            if pattern.match(f['name']):
-                found_files.append(f)
+            file_name = f.get('name', '')
+            match = pattern.match(file_name)
+            if match:
+                extension = f".{match.group(1).lower()}"
+                found_files.append({**f, "extension": extension})
 
         if not found_files:
-            raise FileNotFoundError(f"Nenhum arquivo 'Arquivo Personalizado' com ID '{target_id}' encontrado no Drive.")
-        
-        return found_files[0]['id'], found_files[0]['name']
+            allowed = ", ".join(extensoes_normalizadas)
+            raise FileNotFoundError(
+                f"Nenhum arquivo 'Arquivo Personalizado' com ID '{target_id}' "
+                f"e extensão permitida ({allowed}) encontrado no Drive."
+            )
+
+        found_extensions = sorted({f["extension"] for f in found_files})
+        if retornar_extensao and len(found_extensions) > 1:
+            raise Exception(
+                f"Arquivo personalizado ambíguo para ID '{target_id}'. Foram encontrados "
+                f"arquivos {', '.join(found_extensions)}. Deixe apenas uma extensão por item."
+            )
+
+        extension_priority = {ext: index for index, ext in enumerate(extensoes_normalizadas)}
+        found_files.sort(key=lambda f: (extension_priority.get(f["extension"], 999), f.get("name", "")))
+        selected_file = found_files[0]
+
+        if retornar_extensao:
+            return selected_file['id'], selected_file['name'], selected_file['extension']
+
+        return selected_file['id'], selected_file['name']
 
     except HttpError as error:
         raise Exception(f"Erro ao buscar arquivo personalizado para ID '{target_id}': {error}")
+    except FileNotFoundError:
+        raise
     except Exception as e:
         raise Exception(f"Erro inesperado ao buscar arquivo personalizado para ID '{target_id}': {e}")
-
 
 def upload_to_drive(caminho_arquivo_local: str, nome_arquivo_drive: str, mime_type: str, drive_folder_id: str = DEFAULT_FOLDER_ID):
     """

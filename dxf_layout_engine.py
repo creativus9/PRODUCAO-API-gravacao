@@ -170,15 +170,22 @@ def generate_single_plan_layout_data(
             continue
 
         try:
-            print(f"DEBUG: Calling buscar_arquivo_personalizado_por_id_e_sku for target_id={target_id_from_sheet}, sku={sku}")
-            result_from_search = buscar_arquivo_personalizado_por_id_e_sku(
-                target_id=target_id_from_sheet,
-                sku=sku,
-                drive_folder_id=drive_folder_id
-            )
-            print(f"DEBUG: buscar_arquivo_personalizado_por_id_e_sku returned: {result_from_search}")
-            real_file_id, nome_arquivo_drive = result_from_search
-            print(f"[INFO] Arquivo encontrado no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
+            real_file_id = item_data.get('arquivo_drive_id_resolvido')
+            nome_arquivo_drive = item_data.get('nome_arquivo_drive')
+
+            if real_file_id and nome_arquivo_drive:
+                print(f"[INFO] Arquivo DXF já resolvido no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
+            else:
+                print(f"DEBUG: Calling buscar_arquivo_personalizado_por_id_e_sku for target_id={target_id_from_sheet}, sku={sku}")
+                result_from_search = buscar_arquivo_personalizado_por_id_e_sku(
+                    target_id=target_id_from_sheet,
+                    sku=sku,
+                    drive_folder_id=drive_folder_id,
+                    extensoes_permitidas=(".dxf",),
+                )
+                print(f"DEBUG: buscar_arquivo_personalizado_por_id_e_sku returned: {result_from_search}")
+                real_file_id, nome_arquivo_drive = result_from_search
+                print(f"[INFO] Arquivo encontrado no Drive: ID real='{real_file_id}', Nome='{nome_arquivo_drive}'")
         except FileNotFoundError as e:
             print(f"[ERROR] Falha ao encontrar arquivo no Drive para ID lógico '{target_id_from_sheet}' e SKU '{sku}': {e}. Adicionando ID a falhas.")
             failed_ids_current_plan.append(target_id_from_sheet) # Adiciona ID à lista de falhas
