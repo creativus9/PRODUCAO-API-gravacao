@@ -1,6 +1,7 @@
 import copy
 import os
 import re
+import uuid
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
@@ -147,8 +148,131 @@ def _tag_name(element: ET.Element) -> str:
     return str(element.tag).split("}")[-1].lower()
 
 
+def _replace_url_references(value: str, id_map: Dict[str, str]) -> str:
+    """Atualiza referências como url(#gradiente), inclusive dentro de style="..."."""
+    if not value or not id_map:
+        return value
+
+    def replace(match: re.Match) -> str:
+        quote = match.group(1) or ""
+        old_id = match.group(2)
+        new_id = id_map.get(old_id, old_id)
+        return f"url({quote}#{new_id}{quote})"
+
+    return re.sub(
+        r"url\(\s*(['\"]?)#([^)'\"\s]+)\1\s*\)",
+        replace,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _replace_css_selectors(css_text: str, id_map: Dict[str, str], class_map: Dict[str, str]) -> str:
+    """
+    Isola seletores CSS de um SVG importado.
+
+    Arquivos do Corel costumam repetir nomes como .str0, .fil0 e #Layer_x0020_1.
+    Sem o isolamento, o CSS de um arquivo altera as cores de todos os outros.
+    """
+    if not css_text:
+        return css_text
+
+    scoped = _replace_url_references(css_text, id_map)
+
+    # Substitui somente seletores que realmente existem no SVG. Assim, códigos de
+    # cor como #ED2F59 nunca são confundidos com IDs.
+    for old_id in sorted(id_map, key=len, reverse=True):
+        new_id = id_map[old_id]
+        scoped = re.sub(
+            rf"(?<![A-Za-z0-9_-])#{re.escape(old_id)}(?=$|[^A-Za-z0-9_.:-])",
+            f"#{new_id}",
+            scoped,
+        )
+
+    for old_class in sorted(class_map, key=len, reverse=True):
+        new_class = class_map[old_class]
+        scoped = re.sub(
+            rf"(?<![A-Za-z0-9_-])\.{re.escape(old_class)}(?=$|[^A-Za-z0-9_-])",
+            f".{new_class}",
+            scoped,
+        )
+
+    return scoped
+
+
+def _scope_svg_identifiers(source_root: ET.Element, prefix: str) -> None:
+    """
+    Dá um namespace exclusivo para IDs e classes de cada SVG inserido.
+
+    Também atualiza gradientes, máscaras, clipPaths, filtros, marcadores, <use>,
+    href/xlink:href, referências SMIL e folhas de estilo internas. Isso preserva
+    as cores e efeitos originais mesmo quando vários SVGs usam os mesmos nomes.
+    """
+    elements = list(source_root.iter())
+    id_map: Dict[str, str] = {}
+    class_map: Dict[str, str] = {}
+
+    for element in elements:
+        old_id = element.attrib.get("id")
+        if old_id and old_id not in id_map:
+            id_map[old_id] = f"{prefix}_{old_id}"
+
+        class_value = element.attrib.get("class", "")
+        for class_name in class_value.split():
+            if class_name and class_name not in class_map:
+                class_map[class_name] = f"{prefix}_{class_name}"
+
+    for element in elements:
+        old_id = element.attrib.get("id")
+        if old_id in id_map:
+            element.set("id", id_map[old_id])
+
+        class_value = element.attrib.get("class")
+        if class_value:
+            element.set(
+                "class",
+                " ".join(class_map.get(name, name) for name in class_value.split()),
+            )
+
+        for attr_name, attr_value in list(element.attrib.items()):
+            if not isinstance(attr_value, str):
+                continue
+
+            new_value = _replace_url_references(attr_value, id_map)
+
+            # href e xlink:href para símbolos, imagens, paths de texto etc.
+            if attr_name == "href" or attr_name.endswith("}href"):
+                if new_value.startswith("#"):
+                    ref_id = new_value[1:]
+                    new_value = f"#{id_map.get(ref_id, ref_id)}"
+
+            # Listas de IDs usadas por acessibilidade.
+            if attr_name in {"aria-labelledby", "aria-describedby"}:
+                new_value = " ".join(id_map.get(token, token) for token in new_value.split())
+
+            # Eventos SMIL: begin="objeto.click" / end="objeto.end".
+            if attr_name in {"begin", "end"}:
+                for ref_id, scoped_id in id_map.items():
+                    new_value = re.sub(
+                        rf"(?<![A-Za-z0-9_.:-]){re.escape(ref_id)}(?=\.)",
+                        scoped_id,
+                        new_value,
+                    )
+
+            if new_value != attr_value:
+                element.set(attr_name, new_value)
+
+        if _tag_name(element) == "style" and element.text:
+            element.text = _replace_css_selectors(element.text, id_map, class_map)
+
+
 def _prepare_nested_svg(svg_data: Dict[str, Any], x: float, y: float) -> ET.Element:
     source_root = copy.deepcopy(svg_data["root"])
+
+    # Cada arquivo recebe IDs e classes exclusivos. Sem isso, classes genéricas
+    # do Corel (.str0, .fil0 etc.) colidem e um SVG pode deixar os demais pretos.
+    scope_prefix = f"svgscope_{uuid.uuid4().hex}"
+    _scope_svg_identifiers(source_root, scope_prefix)
 
     # LightBurn costuma interpretar mal <svg> dentro de <svg> usando x/y.
     # Por isso o arquivo importado vira um <g transform=...> normal, que é mais
