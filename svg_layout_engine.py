@@ -266,65 +266,244 @@ def _scope_svg_identifiers(source_root: ET.Element, prefix: str) -> None:
             element.text = _replace_css_selectors(element.text, id_map, class_map)
 
 
+def _split_css_items(text: str, separator: str = ";") -> List[str]:
+    """Divide CSS sem quebrar valores dentro de aspas ou parênteses."""
+    items: List[str] = []
+    current: List[str] = []
+    quote: str | None = None
+    paren_depth = 0
+    escaped = False
+
+    for char in text:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+
+        if quote:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+
+        if char in {"'", '"'}:
+            current.append(char)
+            quote = char
+            continue
+
+        if char == "(":
+            paren_depth += 1
+            current.append(char)
+            continue
+
+        if char == ")":
+            paren_depth = max(0, paren_depth - 1)
+            current.append(char)
+            continue
+
+        if char == separator and paren_depth == 0:
+            item = "".join(current).strip()
+            if item:
+                items.append(item)
+            current = []
+            continue
+
+        current.append(char)
+
+    item = "".join(current).strip()
+    if item:
+        items.append(item)
+    return items
+
+
+def _parse_css_declarations(declaration_text: str) -> Dict[str, Tuple[str, bool]]:
+    """Lê declarações CSS e preserva a indicação !important."""
+    declarations: Dict[str, Tuple[str, bool]] = {}
+    for item in _split_css_items(declaration_text, ";"):
+        if ":" not in item:
+            continue
+        prop, value = item.split(":", 1)
+        prop = prop.strip().lower()
+        value = value.strip()
+        if not prop or not value:
+            continue
+
+        important = bool(re.search(r"\s*!important\s*$", value, re.IGNORECASE))
+        if important:
+            value = re.sub(r"\s*!important\s*$", "", value, flags=re.IGNORECASE).strip()
+        declarations[prop] = (value, important)
+    return declarations
+
+
+def _simple_selector_matches(element: ET.Element, selector: str) -> Tuple[bool, Tuple[int, int, int]]:
+    """
+    Faz correspondência dos seletores simples mais usados em SVGs exportados por
+    CorelDRAW, Illustrator, Inkscape e editores semelhantes.
+
+    Suporta: *, tag, .classe, tag.classe, .a.b, #id e tag#id.classe.
+    Seletores relacionais/pseudo-seletores permanecem no CSS original.
+    """
+    selector = selector.strip()
+    if not selector or selector.startswith("@"):
+        return False, (0, 0, 0)
+
+    # Não tenta reinterpretar seletores relacionais ou pseudo-seletores.
+    if re.search(r"[\s>+~:\[]", selector):
+        return False, (0, 0, 0)
+
+    match = re.fullmatch(
+        r"(?P<tag>\*|[A-Za-z_][\w-]*)?"
+        r"(?P<id>#[A-Za-z_][\w:.-]*)?"
+        r"(?P<classes>(?:\.[A-Za-z_][\w-]*)*)",
+        selector,
+    )
+    if not match:
+        return False, (0, 0, 0)
+
+    tag = match.group("tag")
+    wanted_id = match.group("id")
+    wanted_classes = re.findall(r"\.([A-Za-z_][\w-]*)", match.group("classes") or "")
+
+    local_tag = _tag_name(element)
+    if tag and tag != "*" and local_tag != tag.lower():
+        return False, (0, 0, 0)
+
+    if wanted_id and element.attrib.get("id") != wanted_id[1:]:
+        return False, (0, 0, 0)
+
+    element_classes = set(element.attrib.get("class", "").split())
+    if any(class_name not in element_classes for class_name in wanted_classes):
+        return False, (0, 0, 0)
+
+    specificity = (1 if wanted_id else 0, len(wanted_classes), 1 if tag and tag != "*" else 0)
+    return True, specificity
+
+
+def _extract_css_rules(root: ET.Element) -> List[Tuple[str, Dict[str, Tuple[str, bool]], int]]:
+    """Extrai regras CSS comuns mantendo a ordem original."""
+    rules: List[Tuple[str, Dict[str, Tuple[str, bool]], int]] = []
+    order = 0
+
+    for element in root.iter():
+        if _tag_name(element) != "style" or not element.text:
+            continue
+
+        css_text = re.sub(r"/\*.*?\*/", "", element.text, flags=re.DOTALL)
+        # SVGs de produção normalmente usam regras planas. Blocos @font-face são
+        # mantidos no arquivo e simplesmente não entram no cálculo visual abaixo.
+        for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css_text, flags=re.DOTALL):
+            selectors_text = match.group(1).strip()
+            declarations = _parse_css_declarations(match.group(2))
+            if not declarations:
+                continue
+
+            for selector in _split_css_items(selectors_text, ","):
+                selector = selector.strip()
+                if selector:
+                    rules.append((selector, declarations, order))
+                    order += 1
+
+    return rules
+
+
+# Propriedades visuais que leitores como LightBurn entendem com mais segurança
+# quando também aparecem diretamente no elemento, e não apenas em <style>.
+SVG_PRESENTATION_PROPERTIES = {
+    "alignment-baseline", "baseline-shift", "clip-path", "clip-rule", "color",
+    "color-interpolation", "color-interpolation-filters", "color-rendering",
+    "cursor", "direction", "display", "dominant-baseline", "fill", "fill-opacity",
+    "fill-rule", "filter", "flood-color", "flood-opacity", "font-family",
+    "font-size", "font-stretch", "font-style", "font-variant", "font-weight",
+    "image-rendering", "letter-spacing", "lighting-color", "marker-end",
+    "marker-mid", "marker-start", "mask", "opacity", "overflow", "paint-order",
+    "pointer-events", "shape-rendering", "stop-color", "stop-opacity", "stroke",
+    "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin",
+    "stroke-miterlimit", "stroke-opacity", "stroke-width", "text-anchor",
+    "text-decoration", "text-rendering", "transform-origin", "unicode-bidi",
+    "vector-effect", "visibility", "word-spacing", "writing-mode",
+}
+
+
+def _materialize_css_on_elements(root: ET.Element) -> None:
+    """
+    Materializa as cores e demais propriedades visuais diretamente nos elementos.
+
+    O desenho, paths e coordenadas não são alterados. O CSS original permanece no
+    SVG; apenas copiamos o resultado das classes para atributos/style locais. Isso
+    evita que LightBurn/Corel transformem linhas em preto ao ignorarem <style>
+    depois que vários SVGs são reunidos no mesmo documento.
+    """
+    rules = _extract_css_rules(root)
+    if not rules:
+        return
+
+    for element in root.iter():
+        if _tag_name(element) in {"style", "defs", "metadata", "title", "desc"}:
+            continue
+
+        winners: Dict[str, Tuple[str, bool, Tuple[int, int, int], int]] = {}
+
+        for selector, declarations, order in rules:
+            matches, specificity = _simple_selector_matches(element, selector)
+            if not matches:
+                continue
+
+            for prop, (value, important) in declarations.items():
+                current = winners.get(prop)
+                candidate_key = (1 if important else 0, specificity, order)
+                if current is None:
+                    winners[prop] = (value, important, specificity, order)
+                    continue
+                current_key = (1 if current[1] else 0, current[2], current[3])
+                if candidate_key >= current_key:
+                    winners[prop] = (value, important, specificity, order)
+
+        # style="..." já existente é CSS inline e deve prevalecer.
+        existing_inline = _parse_css_declarations(element.attrib.get("style", ""))
+        for prop, (value, important) in existing_inline.items():
+            winners[prop] = (value, important, (1000, 1000, 1000), 10**9)
+
+        if not winners:
+            continue
+
+        # Mantém style inline completo para navegadores e também duplica as
+        # propriedades visuais como atributos SVG para leitores CAD/laser.
+        inline_style = ";".join(f"{prop}:{data[0]}" for prop, data in winners.items())
+        if inline_style:
+            element.set("style", inline_style)
+
+        for prop, (value, _important, _specificity, _order) in winners.items():
+            if prop in SVG_PRESENTATION_PROPERTIES:
+                element.set(prop, value)
+
+
 def _prepare_nested_svg(svg_data: Dict[str, Any], x: float, y: float) -> ET.Element:
+    """
+    Posiciona um SVG sem desmontá-lo.
+
+    O <svg> original completo é mantido como um SVG aninhado, incluindo seu
+    viewBox, width/height, defs, estilos, grupos e transformações. A montagem só
+    acrescenta um <g transform="translate(...)" > por fora para posicioná-lo.
+    """
     source_root = copy.deepcopy(svg_data["root"])
 
-    # Cada arquivo recebe IDs e classes exclusivos. Sem isso, classes genéricas
-    # do Corel (.str0, .fil0 etc.) colidem e um SVG pode deixar os demais pretos.
+    # Materializa primeiro os estilos usando os nomes originais das classes.
+    _materialize_css_on_elements(source_root)
+
+    # Depois isola IDs/classes para impedir conflitos entre arquivos diferentes.
+    # As propriedades visuais já estão diretamente nos próprios elementos.
     scope_prefix = f"svgscope_{uuid.uuid4().hex}"
     _scope_svg_identifiers(source_root, scope_prefix)
 
-    # LightBurn costuma interpretar mal <svg> dentro de <svg> usando x/y.
-    # Por isso o arquivo importado vira um <g transform=...> normal, que é mais
-    # compatível com Corel, LightBurn e outros leitores SVG.
     wrapper = ET.Element(f"{{{SVG_NS}}}g")
     wrapper.set("transform", f"translate({_fmt(x)},{_fmt(y)})")
-    wrapper.set("pointer-events", "all")
-    wrapper.set("data-locked", "false")
-
-    # Leva atributos visuais simples do <svg> original para o grupo, mas não leva
-    # width/height/viewBox/x/y, porque agora o posicionamento é feito por transform.
-    ignored_root_attrs = {
-        "x", "y", "width", "height", "viewBox", "viewbox", "version",
-        "xmlns", "xmlns:xlink", "overflow", "preserveAspectRatio",
-    }
-    for attr_name, attr_value in source_root.attrib.items():
-        if attr_name in ignored_root_attrs or attr_name.startswith("xmlns"):
-            continue
-        wrapper.set(attr_name, attr_value)
-
-    _unlock_svg_tree(source_root)
-
-    view_box = _parse_viewbox(source_root)
-    content_parent = wrapper
-
-    if view_box:
-        min_x, min_y, vb_width, vb_height = view_box
-        if vb_width > 0 and vb_height > 0:
-            scale_x = svg_data["width"] / vb_width
-            scale_y = svg_data["height"] / vb_height
-            needs_matrix = (
-                abs(scale_x - 1.0) > 0.0001
-                or abs(scale_y - 1.0) > 0.0001
-                or abs(min_x) > 0.0001
-                or abs(min_y) > 0.0001
-            )
-            if needs_matrix:
-                content_parent = ET.SubElement(wrapper, f"{{{SVG_NS}}}g")
-                # Equivale ao comportamento do viewBox: (coord - min) * escala.
-                content_parent.set(
-                    "transform",
-                    f"matrix({_fmt(scale_x)} 0 0 {_fmt(scale_y)} {_fmt(-min_x * scale_x)} {_fmt(-min_y * scale_y)})",
-                )
-                content_parent.set("pointer-events", "all")
-                content_parent.set("data-locked", "false")
-
-    for child in list(source_root):
-        source_root.remove(child)
-        content_parent.append(child)
-
+    wrapper.append(source_root)
     return wrapper
-
 
 def _sanitize_style_for_editing(style_value: str) -> str:
     """
@@ -775,13 +954,12 @@ def create_svg_document(width_mm: float, height_mm: float) -> ET.Element:
     root.set("height", f"{_fmt(height_mm)}mm")
     root.set("viewBox", f"0 0 {_fmt(width_mm)} {_fmt(height_mm)}")
     root.set("version", "1.1")
-    root.set("pointer-events", "all")
-    root.set("data-locked", "false")
     return root
 
 
 def save_svg_document(root: ET.Element, output_path: str) -> None:
-    _unlock_svg_tree(root)
+    # Não normaliza, desbloqueia, achata textos nem reescreve estilos na saída.
+    # O conteúdo de cada SVG já foi preservado dentro do seu próprio <svg>.
     tree = ET.ElementTree(root)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
