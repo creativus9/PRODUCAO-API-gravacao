@@ -259,6 +259,7 @@ async def _compor_plano_svg(entrada: EntradaComposicao, sorted_plans: list, ids_
                 file_ids_and_skus=plan_data["items"],
                 plan_name=plan_data["plan_name"],
                 drive_folder_id=entrada.id_pasta_entrada_drive,
+                global_y_offset=current_y_offset_global,
             )
 
             all_failed_ids.extend(failed_ids_current_plan)
@@ -267,7 +268,9 @@ async def _compor_plano_svg(entrada: EntradaComposicao, sorted_plans: list, ids_
                 print(f"[WARN] Plano SVG '{plan_data['plan_name']}' não gerou elementos visíveis. Pulando este plano.")
                 continue
 
-            plan_group.set("transform", f"translate(0,{current_y_offset_global:.4f})")
+            # O deslocamento vertical já foi aplicado diretamente em cada item
+            # pelo motor SVG. Não usamos transform no grupo inteiro do plano,
+            # pois o LightBurn pode ignorá-lo em montagens complexas.
             plan_groups.append(plan_group)
             max_overall_width = max(max_overall_width, layout_width)
             current_y_offset_global += layout_height + ESPACAMENTO_LINHA_COR

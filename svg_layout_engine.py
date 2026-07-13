@@ -484,25 +484,76 @@ def _materialize_css_on_elements(root: ET.Element) -> None:
 
 def _prepare_nested_svg(svg_data: Dict[str, Any], x: float, y: float) -> ET.Element:
     """
-    Posiciona um SVG sem desmontá-lo.
+    Insere o conteúdo do SVG como um <g> comum, sem criar <svg> aninhado.
 
-    O <svg> original completo é mantido como um SVG aninhado, incluindo seu
-    viewBox, width/height, defs, estilos, grupos e transformações. A montagem só
-    acrescenta um <g transform="translate(...)" > por fora para posicioná-lo.
+    O LightBurn envia SVGs aninhados para a origem do documento, ignorando a
+    posição da montagem. Para manter a compatibilidade, preservamos todos os
+    filhos, defs, estilos, IDs, classes e atributos visuais do arquivo original,
+    mas substituímos apenas a tag raiz <svg> por grupos normais.
+
+    A matriz abaixo reproduz exatamente o comportamento de width/height/viewBox
+    do SVG original e já inclui a posição absoluta calculada pelo layout.
     """
     source_root = copy.deepcopy(svg_data["root"])
 
-    # Materializa primeiro os estilos usando os nomes originais das classes.
+    # Mantém a correção de cores: CSS do Corel vira também atributos diretos.
     _materialize_css_on_elements(source_root)
 
-    # Depois isola IDs/classes para impedir conflitos entre arquivos diferentes.
-    # As propriedades visuais já estão diretamente nos próprios elementos.
+    # Evita colisões de .str0/.fil0, IDs, gradientes, máscaras, filtros e <use>.
     scope_prefix = f"svgscope_{uuid.uuid4().hex}"
     _scope_svg_identifiers(source_root, scope_prefix)
 
     wrapper = ET.Element(f"{{{SVG_NS}}}g")
-    wrapper.set("transform", f"translate({_fmt(x)},{_fmt(y)})")
-    wrapper.append(source_root)
+    wrapper.set("data-svg-item", scope_prefix)
+
+    # Atributos da raiz que controlam aparência/herança são levados para o grupo.
+    # Atributos de viewport não podem permanecer, pois não haverá <svg> aninhado.
+    ignored_root_attrs = {
+        "x", "y", "width", "height", "viewBox", "viewbox", "version",
+        "xmlns", "xmlns:xlink", "overflow", "preserveAspectRatio",
+    }
+    root_transform = source_root.attrib.get("transform")
+    for attr_name, attr_value in source_root.attrib.items():
+        if attr_name in ignored_root_attrs or attr_name == "transform" or attr_name.startswith("xmlns"):
+            continue
+        wrapper.set(attr_name, attr_value)
+
+    view_box = _parse_viewbox(source_root)
+    if view_box:
+        min_x, min_y, vb_width, vb_height = view_box
+    else:
+        min_x = float(svg_data.get("original_min_x", 0.0) or 0.0)
+        min_y = float(svg_data.get("original_min_y", 0.0) or 0.0)
+        vb_width = float(svg_data["width"])
+        vb_height = float(svg_data["height"])
+
+    if vb_width <= 0 or vb_height <= 0:
+        raise ValueError("SVG com viewBox/dimensões inválidas; não é possível montar com segurança.")
+
+    scale_x = float(svg_data["width"]) / vb_width
+    scale_y = float(svg_data["height"]) / vb_height
+    translate_x = float(x) - (min_x * scale_x)
+    translate_y = float(y) - (min_y * scale_y)
+
+    # Matrix é melhor suportada pelo importador do LightBurn que SVGs aninhados.
+    wrapper.set(
+        "transform",
+        f"matrix({_fmt(scale_x)} 0 0 {_fmt(scale_y)} {_fmt(translate_x)} {_fmt(translate_y)})",
+    )
+
+    # Caso a raiz original tivesse transform próprio, ele continua em um grupo
+    # interno, sem misturá-lo à matriz de posicionamento da montagem.
+    content_parent = wrapper
+    if root_transform:
+        content_parent = ET.SubElement(wrapper, f"{{{SVG_NS}}}g")
+        content_parent.set("transform", root_transform)
+
+    # Move cópias de todos os filhos do SVG original. Não altera paths, grupos,
+    # coordenadas, defs, estilos ou a ordem dos elementos.
+    for child in list(source_root):
+        source_root.remove(child)
+        content_parent.append(child)
+
     return wrapper
 
 def _sanitize_style_for_editing(style_value: str) -> str:
@@ -792,7 +843,7 @@ def _add_barra_if_available(parent_group: ET.Element, barra_svg, current_x_pos: 
 
 
 
-def _add_plan_title(parent_group: ET.Element, plan_name: str) -> None:
+def _add_plan_title(parent_group: ET.Element, plan_name: str, y_offset: float = 0.0) -> None:
     """
     Adiciona o título do plano como <text> simples, sem baseline avançado.
     O LightBurn é mais consistente quando recebe x/y absolutos e y como baseline.
@@ -800,7 +851,7 @@ def _add_plan_title(parent_group: ET.Element, plan_name: str) -> None:
     plano_text = ET.SubElement(parent_group, f"{{{SVG_NS}}}text")
     plano_text.set("id", f"plano-gravacao-{re.sub(r'[^A-Za-z0-9_-]+', '-', str(plan_name)).strip('-') or 'sem-nome'}")
     plano_text.set("x", f"{_fmt(PLANO_TEXTO_X_MM)}")
-    plano_text.set("y", f"{_fmt(PLANO_TEXTO_Y_MM + PLANO_TEXTO_TAMANHO_FONTE_MM)}")
+    plano_text.set("y", f"{_fmt(y_offset + PLANO_TEXTO_Y_MM + PLANO_TEXTO_TAMANHO_FONTE_MM)}")
     plano_text.set("font-family", "Arial, Helvetica, sans-serif")
     plano_text.set("font-size", f"{_fmt(PLANO_TEXTO_TAMANHO_FONTE_MM)}")
     plano_text.set("font-weight", "900")
@@ -814,6 +865,7 @@ def generate_single_plan_svg_layout_data(
     file_ids_and_skus: list[dict],
     plan_name: str,
     drive_folder_id: str,
+    global_y_offset: float = 0.0,
 ) -> Tuple[ET.Element, float, float, List[str]]:
     """
     Gera um grupo SVG para um único plano de gravação.
@@ -885,7 +937,7 @@ def generate_single_plan_svg_layout_data(
     text_width_estimate = max(PLANO_DXF_FIXED_WIDTH_MM, len(f"Plano de Gravação {plan_name}") * 9.0)
     layout_width = MARGEM_ESQUERDA + text_width_estimate + MARGEM_ESQUERDA
 
-    _add_plan_title(plan_group, plan_name)
+    _add_plan_title(plan_group, plan_name, global_y_offset)
 
     # Espaço reservado fixo para o título. Isso impede que a posição dos itens dependa
     # da altura calculada da fonte em cada editor/visualizador SVG.
@@ -905,7 +957,9 @@ def generate_single_plan_svg_layout_data(
                     for svg_item in color_group[dxf_format][dxf_size][hole_type]:
                         max_height_in_color_line = max(max_height_in_color_line, svg_item["bbox_height"])
 
-        row_base_y = current_y
+        # A posição global é aplicada diretamente em cada item. Assim o arquivo
+        # final não depende de um transform no grupo inteiro do plano.
+        row_base_y = global_y_offset + current_y
 
         first_format_in_line = True
         for dxf_format in sorted(color_group.keys()):
@@ -958,8 +1012,18 @@ def create_svg_document(width_mm: float, height_mm: float) -> ET.Element:
 
 
 def save_svg_document(root: ET.Element, output_path: str) -> None:
-    # Não normaliza, desbloqueia, achata textos nem reescreve estilos na saída.
-    # O conteúdo de cada SVG já foi preservado dentro do seu próprio <svg>.
+    # O arquivo de saída precisa ter exatamente uma tag <svg>: a raiz. SVGs
+    # aninhados fazem o LightBurn posicionar todos os itens na origem.
+    nested_svg_count = sum(
+        1 for element in root.iter()
+        if element is not root and _tag_name(element) == "svg"
+    )
+    if nested_svg_count:
+        raise ValueError(
+            f"A montagem ainda contém {nested_svg_count} SVG(s) aninhado(s), "
+            "estrutura incompatível com o LightBurn."
+        )
+
     tree = ET.ElementTree(root)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
