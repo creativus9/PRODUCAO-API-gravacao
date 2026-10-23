@@ -231,63 +231,55 @@ def arquivo_existe_drive(nome_arquivo: str, drive_folder_id: str = DEFAULT_FOLDE
         print(f"[ERROR] Erro inesperado ao verificar existência de '{nome_arquivo}' no Drive: {e}")
         return False
 
-def deletar_todos_os_arquivos():
-    """
-    !!! CUIDADO: AÇÃO DESTRUTIVA E IRREVERSÍVEL !!!
-    Exclui PERMANENTEMENTE todos os arquivos (NÃO pastas) que pertencem à conta de serviço,
-    sem movê-los para a lixeira. Use com extrema cautela.
-    Retorna o número de arquivos excluídos.
-    """
-    page_token = None
+def _excluir_arquivos_antigos(somente_lixeira=False):
+    """Exclui somente arquivos criados há mais de 10 dias, preservando pastas."""
+    limite = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=10)
+    limite_drive = limite.isoformat().replace('+00:00', 'Z')
+    query = (
+        "'me' in owners and mimeType != 'application/vnd.google-apps.folder' "
+        f"and createdTime < '{limite_drive}'"
+    )
+    if somente_lixeira:
+        query += " and trashed = true"
+    # Cada limpeza tem seu próprio transporte: o cliente global é usado pelos planos.
+    service = build('drive', 'v3', credentials=creds)
     deleted_count = 0
-    print("[WARN] INICIANDO EXCLUSÃO IRREVERSÍVEL DE TODOS OS ARQUIVOS DA CONTA DE SERVIÇO.")
-    
     try:
+        page_token = None
+        candidatos = []
+        # Finaliza a paginação antes de excluir, evitando alterar a lista paginada.
         while True:
-            response = drive_service.files().list(
-                q="'me' in owners and mimeType != 'application/vnd.google-apps.folder'",
-                spaces='drive',
-                fields='nextPageToken, files(id, name)',
+            response = service.files().list(
+                q=query, spaces='drive', fields='nextPageToken, files(id, createdTime)',
                 pageToken=page_token
             ).execute()
-            
-            files = response.get('files', [])
-            if not files and page_token is None:
-                print("[INFO] Nenhum arquivo pertencente à conta de serviço foi encontrado.")
-                break
-
-            for file in files:
+            for arquivo in response.get('files', []):
+                # Defesa adicional: datas ausentes ou inválidas nunca autorizam exclusão.
                 try:
-                    file_id = file.get('id')
-                    file_name = file.get('name')
-                    print(f"[INFO] Excluindo permanentemente: '{file_name}' (ID: {file_id})")
-                    drive_service.files().delete(fileId=file_id).execute()
-                    deleted_count += 1
-                except HttpError as error:
-                    print(f"[ERROR] Falha ao excluir o arquivo '{file_name}': {error}")
-            
-            page_token = response.get('nextPageToken', None)
-            if page_token is None:
+                    criado = datetime.datetime.fromisoformat(arquivo['createdTime'].replace('Z', '+00:00'))
+                    if criado < limite:
+                        candidatos.append(arquivo['id'])
+                except (KeyError, ValueError, TypeError):
+                    continue
+            page_token = response.get('nextPageToken')
+            if not page_token:
                 break
-
-        print(f"[SUCCESS] Limpeza concluída. Total de {deleted_count} arquivos excluídos permanentemente.")
+        for file_id in candidatos:
+            try:
+                service.files().delete(fileId=file_id).execute()
+                deleted_count += 1
+            except HttpError as error:
+                print(f"[ERROR] Falha ao excluir arquivo {file_id}: {error}")
         return deleted_count
+    finally:
+        service.close()
 
-    except HttpError as error:
-        raise Exception(f"Erro de API durante a exclusão de arquivos: {error}")
-    except Exception as e:
-        raise Exception(f"Erro inesperado durante a limpeza total do Drive: {e}")
+
+def deletar_todos_os_arquivos():
+    """Exclui permanentemente arquivos com mais de 10 dias; preserva os recentes."""
+    return _excluir_arquivos_antigos()
+
 
 def esvaziar_lixeira_drive():
-    """
-    Esvazia permanentemente a lixeira do usuário (neste caso, a conta de serviço).
-    """
-    try:
-        print("[INFO] Tentando esvaziar a lixeira do Google Drive...")
-        drive_service.files().emptyTrash().execute()
-        print("[INFO] Lixeira do Google Drive esvaziada com sucesso.")
-    except HttpError as error:
-        raise Exception(f"Erro ao esvaziar a lixeira do Drive: {error}")
-    except Exception as e:
-        raise Exception(f"Erro inesperado ao esvaziar a lixeira do Drive: {e}")
-
+    """Exclui da lixeira somente arquivos com mais de 10 dias; preserva pastas."""
+    return _excluir_arquivos_antigos(somente_lixeira=True)

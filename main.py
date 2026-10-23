@@ -380,31 +380,31 @@ async def mover_antigos_endpoint(id_pasta_drive: str):
 
 
 @app.post("/esvaziar-lixeira")
-async def esvaziar_lixeira_endpoint():
+def esvaziar_lixeira_endpoint():
     """
-    Endpoint para esvaziar permanentemente a lixeira da conta de serviço no Google Drive.
+    Exclui da lixeira apenas arquivos criados há mais de 10 dias, em thread separada.
     """
     print("[INFO] Requisição para esvaziar a lixeira do Drive recebida.")
     try:
         esvaziar_lixeira_drive()
-        return {"message": "Lixeira do Google Drive esvaziada com sucesso."}
+        return {"message": "Limpeza da lixeira concluída. Arquivos dos últimos 10 dias e pastas foram preservados."}
     except Exception as e:
         print(f"[ERROR] Falha ao tentar esvaziar a lixeira: {e}")
         raise HTTPException(status_code=500, detail=f"Erro ao esvaziar a lixeira: {e}")
 
 
 @app.post("/deletar-tudo")
-async def deletar_tudo_endpoint():
+def deletar_tudo_endpoint():
     """
     !!! CUIDADO: ENDPOINT DESTRUTIVO !!!
-    Endpoint para excluir permanentemente TODOS os arquivos (não pastas) que pertencem
+    Endpoint para excluir permanentemente os arquivos criados há mais de 10 dias (não pastas) que pertencem
     à conta de serviço no Google Drive. Esta ação é IRREVERSÍVEL.
     Use para liberar espaço quando a conta estiver cheia e a limpeza da lixeira não for suficiente.
     """
-    print("[WARN] Requisição para DELETAR TODOS OS ARQUIVOS da conta de serviço recebida.")
+    print("[WARN] Requisição para DELETAR ARQUIVOS COM MAIS DE 10 DIAS da conta de serviço recebida.")
     try:
         deleted_count = deletar_todos_os_arquivos()
-        return {"message": f"Operação concluída. {deleted_count} arquivos foram excluídos permanentemente da conta de serviço."}
+        return {"message": f"Operação concluída. {deleted_count} arquivos antigos foram excluídos permanentemente da conta de serviço. Arquivos dos últimos 10 dias e pastas foram preservados."}
     except Exception as e:
         print(f"[FATAL] Falha catastrófica ao tentar deletar todos os arquivos: {e}")
         raise HTTPException(status_code=500, detail=f"Erro ao deletar todos os arquivos: {e}")
