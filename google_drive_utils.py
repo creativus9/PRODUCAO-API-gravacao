@@ -249,10 +249,17 @@ def _excluir_arquivos_antigos(somente_lixeira=False):
         candidatos = []
         # Finaliza a paginação antes de excluir, evitando alterar a lista paginada.
         while True:
-            response = service.files().list(
-                q=query, spaces='drive', fields='nextPageToken, files(id, createdTime)',
-                pageToken=page_token
-            ).execute()
+            try:
+                response = service.files().list(
+                    q=query, spaces='drive', fields='nextPageToken, files(id, createdTime)',
+                    pageToken=page_token
+                ).execute(num_retries=5)
+            except HttpError as error:
+                print(f"[ERROR] Falha na listagem para limpeza. HTTP {error.resp.status}.")
+                raise RuntimeError(
+                    "Não foi possível listar os arquivos no Google Drive após novas tentativas. "
+                    "Nenhum arquivo foi excluído nesta execução. Tente novamente em alguns minutos."
+                ) from error
             for arquivo in response.get('files', []):
                 # Defesa adicional: datas ausentes ou inválidas nunca autorizam exclusão.
                 try:
@@ -264,12 +271,22 @@ def _excluir_arquivos_antigos(somente_lixeira=False):
             page_token = response.get('nextPageToken')
             if not page_token:
                 break
+        failed_count = 0
         for file_id in candidatos:
             try:
-                service.files().delete(fileId=file_id).execute()
+                service.files().delete(fileId=file_id).execute(num_retries=5)
                 deleted_count += 1
             except HttpError as error:
-                print(f"[ERROR] Falha ao excluir arquivo {file_id}: {error}")
+                # Um arquivo já removido por outra execução não é uma falha da limpeza.
+                if error.resp.status != 404:
+                    failed_count += 1
+                    print(f"[ERROR] Falha ao excluir arquivo {file_id}. HTTP {error.resp.status}.")
+        if failed_count:
+            raise RuntimeError(
+                f"Limpeza parcial: {deleted_count} arquivos excluídos; "
+                f"{failed_count} não puderam ser excluídos. "
+                "Os arquivos dos últimos 10 dias foram preservados. Tente novamente mais tarde."
+            )
         return deleted_count
     finally:
         service.close()

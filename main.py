@@ -406,9 +406,12 @@ def deletar_tudo_endpoint():
     try:
         deleted_count = deletar_todos_os_arquivos()
         return {"message": f"Operação concluída. {deleted_count} arquivos antigos foram excluídos permanentemente da conta de serviço. Arquivos dos últimos 10 dias e pastas foram preservados."}
+    except RuntimeError as e:
+        print(f"[ERROR] Limpeza da conta de serviço não concluída: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        print(f"[FATAL] Falha catastrófica ao tentar deletar todos os arquivos: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro ao deletar todos os arquivos: {e}")
+        print(f"[ERROR] Falha na limpeza da conta de serviço: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail="Não foi possível concluir a limpeza da conta de serviço.")
 
 
 @app.get("/")
