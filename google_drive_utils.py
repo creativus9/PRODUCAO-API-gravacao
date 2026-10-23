@@ -283,3 +283,30 @@ def deletar_todos_os_arquivos():
 def esvaziar_lixeira_drive():
     """Exclui da lixeira somente arquivos com mais de 10 dias; preserva pastas."""
     return _excluir_arquivos_antigos(somente_lixeira=True)
+
+
+def consultar_armazenamento_drive():
+    """Consulta a cota da identidade autenticada sem usar o transporte dos planos."""
+    service = build('drive', 'v3', credentials=creds)
+    try:
+        dados = service.about().get(fields='storageQuota').execute()
+        quota = dados.get('storageQuota', {})
+        def numero(campo):
+            valor = quota.get(campo)
+            return int(valor) if valor is not None else None
+        limite = numero('limit')
+        usado = numero('usage')
+        percentual = round(usado / limite * 100, 2) if limite and usado is not None else None
+        return {
+            'capacity_bytes': limite,
+            'used_bytes': usado,
+            'drive_used_bytes': numero('usageInDrive'),
+            'trash_used_bytes': numero('usageInDriveTrash'),
+            'available_bytes': max(0, limite - usado) if limite is not None and usado is not None else None,
+            'used_percent': percentual,
+            'is_full': usado >= limite if limite is not None and usado is not None else None,
+            'retention_days': 10,
+            'checked_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+    finally:
+        service.close()

@@ -15,6 +15,7 @@ from google_drive_utils import (
     buscar_arquivo_personalizado_por_id_e_sku,
     esvaziar_lixeira_drive,
     deletar_todos_os_arquivos,
+    consultar_armazenamento_drive,
 )
 
 app = FastAPI()
@@ -413,3 +414,12 @@ def deletar_tudo_endpoint():
 @app.get("/")
 async def root():
     return {"message": "API híbrida de Composição DXF/SVG e Gerenciamento de Drive está online!"}
+
+
+@app.get("/drive/armazenamento")
+def armazenamento_drive_endpoint():
+    try:
+        return consultar_armazenamento_drive()
+    except Exception as exc:
+        print(f"[ERROR] Falha ao consultar armazenamento: {exc}")
+        raise HTTPException(status_code=502, detail="Não foi possível consultar o armazenamento do Drive.")
